@@ -179,9 +179,10 @@ build_test() {
 compile_check
 
 if (( ! CHECK_ONLY )); then
-    # Only the transform test lives here.  End-to-end GEMM correctness goes
-    # through the production path instead (./develop.sh, then
-    # tests/python/test_gemm.py), so there is no second GEMM harness to maintain.
+    # End-to-end GEMM correctness goes through the production path instead
+    # (./develop.sh, then tests/python/test_gemm.py), so there is no second GEMM
+    # harness to maintain here -- only the two stages that isolate a layer.
+    build_test test_swizzle
     build_test test_transform
 fi
 

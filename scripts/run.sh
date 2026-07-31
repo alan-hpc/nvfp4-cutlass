@@ -4,10 +4,17 @@
 #
 #   ./scripts/run.sh
 #
-# This covers only the transform stage: the A-tile swizzle replication and
-# Algorithm 1, with no MMA, no UTCCP and no epilogue. It is the first thing to
-# run on new hardware, because everything downstream depends on it and a swizzle
-# mistake is silent -- wrong numbers, no fault.
+# Two stages, each isolating one layer:
+#
+#   0  swizzled_byte_offset() against TMA itself. TMA applies the hardware
+#      swizzle by definition, so a round trip through it is an oracle the
+#      transform test cannot provide -- that one reads back through the same
+#      helper it wrote with, so a systematic error cancels.
+#   1  the transform: A-tile reads and Algorithm 1, no MMA, no UTCCP, no epilogue.
+#
+# Run these before anything end-to-end: a swizzle mistake is silent, and shows up
+# downstream only as a GEMM whose output has the right magnitude and no
+# correlation at all.
 #
 # End-to-end correctness is the production path's job:
 #
@@ -29,12 +36,25 @@ else
     warn "nvidia-smi not found; is this a GPU host?"
 fi
 
-[[ -x "$BUILD/test_transform" ]] || die "$BUILD/test_transform not built; run ./scripts/build.sh first"
+for name in test_swizzle test_transform; do
+    [[ -x "$BUILD/$name" ]] || die "$BUILD/$name not built; run ./scripts/build.sh first"
+done
 
 echo
-say "Stage 1: A-tile swizzle + Algorithm 1"
+say "Stage 0: shared-memory swizzle vs TMA"
 printf '%.0s-' {1..72}; echo
+if ! "$BUILD/test_swizzle"; then
+    rc=$?
+    echo
+    warn "swizzle test failed (exit $rc)"
+    warn "everything downstream reads shared memory through this mapping, so"
+    warn "nothing else will tell you anything until it is right"
+    exit $rc
+fi
 
+echo
+say "Stage 1: A-tile reads + Algorithm 1"
+printf '%.0s-' {1..72}; echo
 if "$BUILD/test_transform"; then
     echo
     say "transform stage OK"

@@ -37,25 +37,37 @@ enum class ScalePolicy
 /// Byte offset of element (m, k) inside a K-major, `kSwizzleMode`-swizzled tile.
 ///
 /// TMA splits a row into `BLOCK_K * sizeof(T) / kSwizzleMode` independent
-/// swizzle atoms, each stored as its own [BLOCK_MN, atom] sub-tile.  Inside an
-/// atom the 16-byte bank group index is XORed with `m % (kSwizzleMode / 16)`.
-/// The transform warps read A with plain LDS, so they have to reproduce exactly
-/// this mapping -- there is no TMA to do it for them.
+/// swizzle atoms, each stored as its own [BLOCK_MN, atom] sub-tile. The transform
+/// warps read A and write A0/A1 with plain LDS/STS, so they have to reproduce
+/// this mapping exactly -- there is no TMA to do it for them, and a mismatch is
+/// silent.
+///
+/// The XOR source is *not* simply the row index. CuTe spells the three modes
+/// SW128/SW64/SW32 as `Swizzle<3,4,3>`/`<2,4,3>`/`<1,4,3>`: B bits taken from bit
+/// 7 of the offset upward, XORed into the 16-byte chunk index at bit 4. A swizzle
+/// atom is always 8 rows tall, so with `offset = row * kSwizzleMode + chunk * 16 + byte`
+/// the chunk index sits at bits [4, 4+log2(chunks)) and the rows above it:
+///
+///   128 B: chunk = bits[4,7), row = bits[7,10)  ->  XOR with  row       % 8
+///    64 B: chunk = bits[4,6), row = bits[6, 9)  ->  XOR with (row >> 1) % 4
+///    32 B: chunk = bits[4,5), row = bits[5, 8)  ->  XOR with (row >> 2) % 2
+///
+/// Only the 128 B case reduces to `row % chunks`; assuming that form for the
+/// others scrambles the tile.
 template<uint32_t BLOCK_MN, uint32_t kSwizzleMode>
 CUTLASS_DEVICE uint32_t swizzled_byte_offset(const uint32_t& m, const uint32_t& k_byte)
 {
-    NVFP4_STATIC_ASSERT(kSwizzleMode == 32 or kSwizzleMode == 64 or kSwizzleMode == 128,
-                        "Unsupported swizzle mode");
+    NVFP4_STATIC_ASSERT(kSwizzleMode == 32 or kSwizzleMode == 64 or kSwizzleMode == 128, "Unsupported swizzle mode");
     constexpr uint32_t kNumBankGroups = kSwizzleMode / 16;
-    // Bytes of one row inside a single swizzle atom.
-    constexpr uint32_t kAtomRowBytes = kSwizzleMode;
+    constexpr uint32_t kAtomRowBytes  = kSwizzleMode;
+    constexpr uint32_t kRowShift      = kSwizzleMode == 128 ? 0 : (kSwizzleMode == 64 ? 1 : 2);
 
     const uint32_t atom_idx      = k_byte / kAtomRowBytes;
     const uint32_t byte_in_atom  = k_byte % kAtomRowBytes;
     const uint32_t bank_group    = byte_in_atom / 16;
     const uint32_t byte_in_group = byte_in_atom % 16;
 
-    const uint32_t swizzled_group = bank_group ^ (m % kNumBankGroups);
+    const uint32_t swizzled_group = bank_group ^ ((m >> kRowShift) & (kNumBankGroups - 1));
     return atom_idx * (BLOCK_MN * kAtomRowBytes) +   // atom sub-tile
            m * kAtomRowBytes +                       // row inside the atom
            swizzled_group * 16 + byte_in_group;      // swizzled position
