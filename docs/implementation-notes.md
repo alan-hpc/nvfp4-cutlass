@@ -329,10 +329,10 @@ kernel **未经编译、未经运行**。以下五点是代码里编码了、但
 
 | # | 假设 | 位置 | 怎么验 |
 | --- | --- | --- | --- |
-| 1 | swizzle 手工复现正确 | `swizzled_byte_offset()` | **最该先做、也最容易单独做**：TMA 一个已知 pattern 进 A stage，只跑 transform，把 A0/SFA0 拷回 host，与 `tests/reference/dual_nvfp4.py` 逐元素比。错了不会报错，只会算错。 |
+| 1 | ~~swizzle 手工复现正确~~ | `swizzled_byte_offset()` | **已验证**（第 12.3 节）：B300 上 scale 0/1024 全对。 |
 | 2 | NVFP4 的 TMEM SF 寻址 | MMA warp：每 UMMA-K 步 TMEM 列 +4、`sf_id = 0` | 对照 PTX ISA 中 `tcgen05.mma ... .block16` 对 scale operand 的描述。模型是"一条 `.block16` 恰好消费一个 128×4 atom"。 |
 | 3 | packed FP4 的 SMEM 形态 | transform 写 packed；host 用 `fp4_unpacked_smem=false` | DeepGEMM 自己的 FP4 路径用的是 **unpacked** SMEM 变体（`float_e2m1_unpacksmem_t`）。需确认 UMMA 能按 64 B swizzle 读真正打包的 SMEM。若不能，transform 的写出格式要跟着改。 |
-| 4 | `cvt.rn.satfinite.e2m1x2.f32` 的操作数顺序 | `ptx/tcgen05.cuh` | 当前假设第一个参数进高 nibble。一条指令即可验：转一对已知值，读回字节。错了表现为块内相邻元素两两互换。 |
+| 4 | ~~`cvt` 操作数顺序~~ | — | **已消除**（第 12.1 节）：改用 CUDA intrinsic 后顺序由 NVIDIA 定义，不再是假设。 |
 | 5 | `cutlass::float_ue4m3_t` 是 NVFP4 的正确 SF 类型 | `make_instr_desc_block_scaled` | 初始化 `3rdparty/cutlass` 后 grep 即可确认；编译期就会暴露。 |
 
 第 5 条编译就能发现，第 4 条一条指令就能验，第 1 条有明确的隔离测试路径。
@@ -505,7 +505,80 @@ SwiGLU + 加权 reduce。而本 harness 的其他 backend 都是**一个 expert 
 
 ---
 
-## 12. 依赖解耦与目录重构
+## 12. B300 上的 bring-up 记录
+
+kernel 在 B300（CUDA 13.3、compute capability 10.3）上编译通过、transform 跑通。
+这一节记录实测暴露出的三个问题，以及每个问题最后归到哪里——因为其中两个的表象
+和真因并不一致。
+
+### 12.1 ~200 个 `cvt` 错误 —— 我的真 bug
+
+`cvt.rn.satfinite.e2m1x2.f32` 的目的操作数是 `.b8`，`cvt.rn.f16x2.e2m1x2` 的源也是 `.b8`，
+而我用了 `"h"`（16 位）约束。**PTX inline asm 根本没有 8 位约束类**，这两条指令手写就必须配
+`.reg .b8` 临时变量加显式位宽转换。
+
+结论：不该手写。改用 CUDA 头文件的 `__nv_cvt_float2_to_fp4x2` /
+`__nv_cvt_fp4x2_to_halfraw2` / `__nv_cvt_float_to_fp8`。副作用是**第 9 节的第 4 条假设
+（nibble 顺序）直接消失了**——顺序由 NVIDIA 定义（`float2{x,y}` 的 x 进低 nibble），不再是我的猜测。
+
+### 12.2 tcgen05 全族被拒 —— 不是代码问题，是 arch target
+
+ptxas 报 `.target 'sm_100'`。裸 `sm_100` 没有 tcgen05，所以 fence、mma、`.cta_group::1`、
+`.block_scale`、`.block16` 一起报错。
+
+真因比"flag 写错了"更细：`--gpu-architecture=sm_100f` 在**整编模式**（`-c`）下会展开成
+`code=[compute_100, sm_100f]`，为了嵌那份前向兼容 PTX，nvcc 生成的 PTX 里写的是
+`.target sm_100`，**ptxas 优先听文件内的指示符**。而 `-cubin` 不嵌 PTX，所以同一个 flag 在
+`-cubin` 下是好的。
+
+这直接导致我第一版探针失效：**探针用 `-cubin`、真实编译用 `-c`，探针根本碰不到这条路径**，
+于是它"通过"了一个实际不能用的 flag。教训是探针必须和被测对象同模式。
+
+修好后两处都用 `-c` 探测，候选顺序改成显式 `-gencode=arch=compute_100f,code=sm_100f` 优先
+（点名虚拟架构就去掉了嵌 PTX 那一半）。实测选中的正是这一条。
+
+### 12.3 transform "FAIL" 两轮 —— 都是判据错，kernel 是对的
+
+**最重要的一个数是 `scale mismatches: 0 / 1024`。** block scale 是线程读到的 64 个 BF16 的
+amax，全对就意味着每个线程都读到了正确数据——**第 9 节的第 5 条（手写 swizzle 复现）通过了**。
+这是整个实现里最担心的一条，因为错了不报错、只出错数。
+
+第一轮 FAIL 的 `rel L2 0.697 / max abs 6960`，是我自己在 fixture 里塞了一行 ±1e4。
+NVFP4 在 `G_A=1` 下可表示上限是 448×6=2688。手算 `6×448 + 6×56 = 3024`，
+误差 `9984−3024 = 6960`，与报告数字分毫不差。参考实现同样饱和——我却拿"重构 vs 原始输入"
+当判据，等于在测 NVFP4 的量程上限，不是在测 kernel。
+
+第二轮改成"device 重构 vs 参考重构"后，剩 2 个差异：
+
+```
+q0: device −6.0 vs ref −4.0      s0 = 0.234375
+q1: device +6.0 vs ref −6.0      s1 = s0/8
+device: −6·s0 + 6·s1 = −1.23046875
+ref   : −4·s0 − 6·s1 = −1.11328125
+真值 x = −5.0·s0 = −1.171875
+```
+
+**两边误差绝对值完全相等（±0.05859375），只是落在真值两侧。** 值正好压在 E2M1 中点 5.0 上，
+device 的 `rcp.approx` 让 |u| 微微越过 5.0，参考的精确除法没有。
+
+我一度怀疑是硬件 tie 规则和参考不一致，为此加了个中点探针——**探针把这个猜测证伪了**：
+7 个中点上硬件和参考完全一致（`2.50 -> 2.0/2.0`）。加探针的价值正在于此。
+
+差值之所以超过"半个最小量化步长"的阈值，是因为 **E2M1 顶端间隔 2.0·s0，而 derived_div8
+的残差量程只有 ±0.75·s0，补偿不满**——这正是算法文档提到的"少量 clip 到 ±6"，是算法固有性质。
+
+所以判据第三次改对：不问"是否一致"，问"**device 的量化是否不差于参考**"。code 差异分三类：
+inert（同值，符号零）、boundary（异值等误差，边界另一侧）、worse（真的更差，才算失败）。
+
+### 12.4 三次判据都错，共同的毛病
+
+三次都是**拿错了参照物**：先拿原始输入（测的是 NVFP4 量程）、再拿参考的逐位输出
+（测的是 rcp.approx 的确定性）、最后才是"量化质量不劣于参考"。写数值 kernel 的测试时，
+参照物选错比阈值定错更隐蔽，因为它每次都给出一个看起来很像 bug 的数字。
+
+---
+
+## 13. 依赖解耦与目录重构
 
 最初的实现直接 include DeepGEMM 的头文件，host 侧还用了 `../../../3rdparty/DeepGEMM/csrc/...`
 这种相对路径。这有两个实际问题：源文件不可移动（换目录就断），以及 `nvfp4_gemm` 无法脱离
@@ -561,7 +634,7 @@ grouped GEMM 和 `per_token_cast_to_fp4`（第 11.4 节说明了为什么 NVFP4 
 
 ---
 
-## 13. 后续方向
+## 14. 后续方向
 
 按预期收益排序：
 
