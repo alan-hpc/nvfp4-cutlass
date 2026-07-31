@@ -67,13 +67,17 @@ fi
 
 # --------------------------------------------------------------------- arch --
 # The tcgen05 NVFP4 MMA only exists on architecture-specific ("a") or
-# architecture-family ("f") targets. A plain `sm_100` has none of it, and how a
-# given nvcc spells the suffix has moved between releases -- CUDA 13.3 silently
-# drops it from `--gpu-architecture=sm_100f`, leaving ptxas on `.target sm_100`
-# and rejecting every tcgen05 instruction.
+# architecture-family ("f") targets; a plain `sm_100` has none of it.
 #
-# So probe instead of assume: assemble the actual instruction and keep the first
-# spelling that survives.
+# `--gpu-architecture=sm_100f` is not enough on its own. In whole-compilation
+# mode it expands to `code=[compute_100, sm_100f]`, and to embed that
+# forward-compatible PTX nvcc emits `.target sm_100` -- ptxas then honours the
+# directive inside the file and rejects every suffixed instruction. Naming the
+# virtual architecture explicitly (`arch=compute_100f,code=sm_100f`) drops the
+# PTX-embedding half and keeps the suffix on both stages.
+#
+# The probe therefore has to compile the same way the real build does: `-cubin`
+# skips PTX embedding entirely and would pass a flag that then fails under `-c`.
 probe_arch() {
     local probe_src="$BUILD/arch_probe.cu"
     mkdir -p "$BUILD"
@@ -90,37 +94,37 @@ __global__ void probe(unsigned long long a, unsigned long long b, unsigned c, un
 }
 PROBE
 
-    local candidate
+    local candidate rc=1
     for candidate in "$@"; do
-        if nvcc $candidate -cubin -o /dev/null "$probe_src" >/dev/null 2>&1; then
+        if nvcc $candidate -c -o "$BUILD/arch_probe.o" "$probe_src" >/dev/null 2>&1; then
             printf '%s' "$candidate"
-            return 0
+            rc=0
+            break
         fi
     done
-    return 1
+    rm -f "$BUILD/arch_probe.o"
+    return $rc
 }
 
 if [[ -z "$ARCH_FLAGS" ]]; then
     say "probing which architecture flag assembles the NVFP4 MMA"
-    # Family target first: one cubin then runs on both B200 and B300. Fall back
-    # to the arch-specific targets, which are narrower but always available.
-    # Family targets first (one cubin runs across the family), then the
-    # architecture-specific ones. Both 100f and 103f are tried because which
-    # capability roots the Blackwell family has moved between CUDA releases.
+    # Explicit virtual+real pairs first: those keep the suffix on the emitted
+    # PTX. Family before architecture-specific, so one cubin still covers B200
+    # and B300 when the toolchain allows it; both 100f and 103f are tried because
+    # which capability roots the Blackwell family has moved between releases.
     ARCH_FLAGS="$(probe_arch \
-        "--gpu-architecture=sm_100f" \
         "-gencode=arch=compute_100f,code=sm_100f" \
-        "--gpu-architecture=sm_103f" \
         "-gencode=arch=compute_103f,code=sm_103f" \
-        "--gpu-architecture=sm_103a" \
         "-gencode=arch=compute_103a,code=sm_103a" \
-        "--gpu-architecture=sm_100a" \
-        "-gencode=arch=compute_100a,code=sm_100a" || true)"
+        "-gencode=arch=compute_100a,code=sm_100a" \
+        "--gpu-architecture=sm_100f" \
+        "--gpu-architecture=sm_103a" \
+        "--gpu-architecture=sm_100a" || true)"
     if [[ -z "$ARCH_FLAGS" ]]; then
         die "no architecture flag assembled 'tcgen05.mma ... kind::mxf4nvf4.block16'.
-       Tried sm_100f, sm_103f, sm_103a, sm_100a in both --gpu-architecture and
-       -gencode spellings. Needs CUDA >= 12.9 and a Blackwell target.
-       Reproduce by hand:  nvcc --gpu-architecture=sm_103a -cubin -o /dev/null $BUILD/arch_probe.cu
+       Tried compute_100f/103f/103a/100a as explicit -gencode pairs and as
+       --gpu-architecture. Needs CUDA >= 12.9 and a Blackwell target.
+       Reproduce by hand:  nvcc -gencode=arch=compute_103a,code=sm_103a -c -o /tmp/p.o $BUILD/arch_probe.cu
        or pass the working flags with --arch '<flags>'."
     fi
     say "using: $ARCH_FLAGS"

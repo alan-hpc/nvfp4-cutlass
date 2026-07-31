@@ -79,11 +79,14 @@ class Compiler
     /// Find an architecture flag that actually assembles the NVFP4 MMA.
     ///
     /// The tcgen05 NVFP4 instructions exist only on architecture-specific ("a")
-    /// or architecture-family ("f") targets, and which spelling a given nvcc
-    /// honours has moved between releases -- CUDA 13.3 drops the suffix from
-    /// `--gpu-architecture=sm_100f` and leaves ptxas on a plain `sm_100`, where
-    /// every tcgen05 instruction is rejected. Probing once at init costs one
-    /// tiny nvcc invocation and removes the guess.
+    /// or architecture-family ("f") targets. `--gpu-architecture=sm_100f` alone
+    /// is not enough: in whole-compilation mode it also embeds forward-compatible
+    /// PTX, and that PTX carries `.target sm_100`, which ptxas then honours --
+    /// rejecting every suffixed instruction. Naming the virtual architecture
+    /// explicitly keeps the suffix on both stages.
+    ///
+    /// The probe compiles with `-c`, the stricter of the two modes, so the flag
+    /// it returns also works for the `-cubin` compilation this JIT actually uses.
     std::string resolve_arch_flags()
     {
         if (const auto override_flags = get_env("NVFP4_ARCH_FLAGS"); not override_flags.empty())
@@ -105,22 +108,20 @@ class Compiler
                 << "}\n";
         }
 
-        // Family targets first, so one cubin covers B200 and B300; then the
-        // architecture-specific fallbacks.
+        // Explicit virtual+real pairs first, family before architecture-specific.
         const std::vector<std::string> candidates = {
-            "--gpu-architecture=sm_100f",
             "-gencode=arch=compute_100f,code=sm_100f",
-            "--gpu-architecture=sm_103f",
             "-gencode=arch=compute_103f,code=sm_103f",
-            "--gpu-architecture=sm_103a",
             "-gencode=arch=compute_103a,code=sm_103a",
-            "--gpu-architecture=sm_100a",
             "-gencode=arch=compute_100a,code=sm_100a",
+            "--gpu-architecture=sm_100f",
+            "--gpu-architecture=sm_103a",
+            "--gpu-architecture=sm_100a",
         };
         for (const auto& candidate : candidates)
         {
-            const auto command =
-                (cuda_home / "bin" / "nvcc").string() + " " + candidate + " -cubin -o /dev/null " + probe_path.string();
+            const auto command = (cuda_home / "bin" / "nvcc").string() + " " + candidate + " -c -o " +
+                                 (cache_dir / "arch_probe.o").string() + " " + probe_path.string();
             if (run_command(command).first == 0)
             {
                 if (not get_env("NVFP4_JIT_DEBUG").empty())
