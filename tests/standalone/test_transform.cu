@@ -23,7 +23,7 @@
 
 #include <cutlass/arch/barrier.h>
 
-#include <deep_gemm/common/tma_copy.cuh>
+#include <nvfp4_gemm/common/tma_copy.cuh>
 #include <nvfp4_gemm/transform/dual_nvfp4.cuh>
 
 #include "reference.hpp"
@@ -74,7 +74,7 @@ __global__ __launch_bounds__(kNumThreads, 1) void transform_test_kernel(const __
 
     if (warp_idx == 0 and cute::elect_one_sync())
     {
-        deep_gemm::tma::copy<BLOCK_K, BLOCK_M, kSwizzleA, __nv_bfloat16>(
+        tma::copy<BLOCK_K, BLOCK_M, kSwizzleA, __nv_bfloat16>(
             &tma_a,
             barrier,
             smem_a,

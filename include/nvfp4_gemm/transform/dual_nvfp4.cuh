@@ -3,11 +3,11 @@
 #include <cuda/std/cstdint>
 #include <cuda_bf16.h>
 
-#include <deep_gemm/common/exception.cuh>
-#include <deep_gemm/common/math.cuh>
-#include <deep_gemm/ptx/ld_st.cuh>
+#include <nvfp4_gemm/common/macros.cuh>
+#include <nvfp4_gemm/common/math.cuh>
+#include <nvfp4_gemm/ptx/ld_st.cuh>
 
-#include "../ptx/tcgen05_nvfp4.cuh"
+#include <nvfp4_gemm/ptx/tcgen05.cuh>
 
 namespace nvfp4_gemm::transform {
 
@@ -44,8 +44,8 @@ enum class ScalePolicy
 template<uint32_t BLOCK_MN, uint32_t kSwizzleMode>
 CUTLASS_DEVICE uint32_t swizzled_byte_offset(const uint32_t& m, const uint32_t& k_byte)
 {
-    DG_STATIC_ASSERT(kSwizzleMode == 32 or kSwizzleMode == 64 or kSwizzleMode == 128,
-                     "Unsupported swizzle mode");
+    NVFP4_STATIC_ASSERT(kSwizzleMode == 32 or kSwizzleMode == 64 or kSwizzleMode == 128,
+                        "Unsupported swizzle mode");
     constexpr uint32_t kNumBankGroups = kSwizzleMode / 16;
     // Bytes of one row inside a single swizzle atom.
     constexpr uint32_t kAtomRowBytes = kSwizzleMode;
@@ -114,7 +114,7 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
     // and the reference disagree on every block whose amax/6 is not exactly
     // representable in E4M3.
     const float s0f    = ptx::cvt_e4m3_to_f32(s0_code);
-    const float inv_s0 = deep_gemm::math::fast_rcp(s0f);
+    const float inv_s0 = math::fast_rcp(s0f);
 
     // 3: q0 = Q_e2m1(x * rcp(s0)), two elements per hardware instruction.
     float u[kBlockSize];
@@ -176,7 +176,7 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
             r_amax = fmaxf(r_amax, fabsf(r[i]));
         }
         s1_code            = ptx::cvt_e4m3(fmaxf(r_amax * kInvE2M1Max, 1.0f / 512.0f));
-        const float inv_s1 = deep_gemm::math::fast_rcp(ptx::cvt_e4m3_to_f32(s1_code));
+        const float inv_s1 = math::fast_rcp(ptx::cvt_e4m3_to_f32(s1_code));
 #pragma unroll
         for (uint32_t i = 0; i < kBlockSize / 2; ++i)
             q1_bytes[i] = static_cast<uint8_t>(
@@ -209,14 +209,14 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
 {
     constexpr uint32_t kAtomsPerRow = BLOCK_K / kKPerSFAtom;
     constexpr uint32_t kNumTasks    = BLOCK_M * kAtomsPerRow;
-    DG_STATIC_ASSERT(BLOCK_K % kKPerSFAtom == 0, "Block K must cover whole SF atoms");
-    DG_STATIC_ASSERT(kNumTasks % kNumTransformThreads == 0,
-                     "Transform threads must evenly divide the tile");
+    NVFP4_STATIC_ASSERT(BLOCK_K % kKPerSFAtom == 0, "Block K must cover whole SF atoms");
+    NVFP4_STATIC_ASSERT(kNumTasks % kNumTransformThreads == 0,
+                        "Transform threads must evenly divide the tile");
     constexpr uint32_t kTasksPerThread = kNumTasks / kNumTransformThreads;
 
     // Byte size of one 128-row scale atom: 128 rows x 4 E4M3 bytes.
     constexpr uint32_t kSFAtomBytes = 128 * kSFPerAtom;
-    DG_STATIC_ASSERT(BLOCK_M == 128, "SF atom addressing assumes exactly 128 rows");
+    NVFP4_STATIC_ASSERT(BLOCK_M == 128, "SF atom addressing assumes exactly 128 rows");
 
 #pragma unroll
     for (uint32_t t = 0; t < kTasksPerThread; ++t)
@@ -233,7 +233,7 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         {
             const uint32_t k_byte = (k_base + g * 8) * sizeof(__nv_bfloat16);
             const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleAMode>(m, k_byte);
-            const uint4    raw    = deep_gemm::ptx::ld_shared(
+            const uint4    raw    = ptx::ld_shared(
                 reinterpret_cast<const uint4*>(reinterpret_cast<const uint8_t*>(smem_a) + offset));
 
             // Each uint32 holds two BF16; widen both.
@@ -287,22 +287,22 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         {
             const uint32_t k_byte = k_base / 2 + g * 16;
             const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleA0Mode>(m, k_byte);
-            deep_gemm::ptx::st_shared(smem_a0 + offset,
-                                      *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 0),
-                                      *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 4),
-                                      *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 8),
-                                      *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 12));
-            deep_gemm::ptx::st_shared(smem_a1 + offset,
-                                      *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 0),
-                                      *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 4),
-                                      *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 8),
-                                      *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 12));
+            ptx::st_shared(smem_a0 + offset,
+                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 0),
+                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 4),
+                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 8),
+                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 12));
+            ptx::st_shared(smem_a1 + offset,
+                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 0),
+                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 4),
+                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 8),
+                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 12));
         }
 
         // ---- Store the scale word, already in UTCCP order --------------------
         const uint32_t sf_offset = atom_idx * kSFAtomBytes + sf_atom_word_idx(m) * 4;
-        deep_gemm::ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa0 + sf_offset), sf0_word);
-        deep_gemm::ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa1 + sf_offset), sf1_word);
+        ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa0 + sf_offset), sf0_word);
+        ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa1 + sf_offset), sf1_word);
     }
 }
 

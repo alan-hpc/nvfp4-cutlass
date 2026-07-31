@@ -68,16 +68,17 @@ warp 3+           epilogue warp group
 
 1. **NVFP4 MMA 指令**。DeepGEMM 只有 `SM100_MMA_MXF4_SS`，即
    `kind::mxf4.block_scale.block32`（MXFP4：块 32、UE8M0 尺度）。NVFP4 是另一个 operand kind，
-   要 `kind::mxf4nvf4.block_scale.block16`。→ `ptx/tcgen05_nvfp4.cuh`
+   要 `kind::mxf4nvf4.block_scale.block16`。→ `ptx/tcgen05.cuh`
 2. **mainloop 内的 transform**。DeepGEMM 的 producer 只搬字节不算数。→ `transform/dual_nvfp4.cuh`
 3. **每个 K 步两遍 MMA**共享一份 B 片段、共享累加器。→ 在 kernel 的 MMA warp 里
 4. **epilogue 的 `G_W`**。DeepGEMM 的 `sm100_store_cd` 只有 `apply_index_n` 这种下标变换钩子，
-   没有数值缩放钩子。→ `epilogue/sm100_store_cd_gscale.cuh`
+   没有数值缩放钩子。→ `epilogue/sm100_store_cd.cuh`
 
 另外发现一处 DeepGEMM 的工具函数**不能直接用**：`mma::sm100::advance_umma_desc_lo` 按
 `sizeof(dtype_t)` 推进地址，但没有除以 pack factor。`make_umma_desc` 自己在算指针时除了
 （`... * sizeof(dtype_t) / kPackFactor`），`advance_umma_desc_lo` 没有。对 E2M1 operand
-会多推进一倍。所以 kernel 里自己写了 `advance_packed_fp4_desc_lo`，并在注释里说明原因。
+会多推进一倍。所以自己写了 `advance_packed_fp4_desc_lo`（第 12.1 节 vendor 之后它就住在
+`mma/sm100.cuh` 里，通用版本干脆没被搬进来）。
 
 ---
 
@@ -195,8 +196,7 @@ offset = atom_idx * (BLOCK_MN * kSwizzleMode)   // atom 子 tile
 - BF16 A：`kSwizzleAMode = 128`，一行 256 B → 2 个 atom，`^ (m % 8)`
 - packed FP4 A0/A1/W：`kSwizzleABMode = 64`，一行 64 B → 1 个 atom，`^ (m % 4)`
 
-后者满足 `make_umma_desc` 的断言 `kSwizzleMode × kPackFactor == BLOCK_K × sizeof(dtype)`
-即 `64×2 == 128×1` ✓。
+后者满足 `make_packed_fp4_desc` 的断言 `kSwizzleMode × 2 == BLOCK_K` 即 `64×2 == 128` ✓。
 
 **这是最容易出错且失败最隐蔽的一处**：swizzle 复现错了不会报错，只会算出错误结果。
 第 9 节给了单独验证它的方法。
@@ -332,7 +332,7 @@ kernel **未经编译、未经运行**。以下五点是代码里编码了、但
 | 1 | swizzle 手工复现正确 | `swizzled_byte_offset()` | **最该先做、也最容易单独做**：TMA 一个已知 pattern 进 A stage，只跑 transform，把 A0/SFA0 拷回 host，与 `tests/reference/dual_nvfp4.py` 逐元素比。错了不会报错，只会算错。 |
 | 2 | NVFP4 的 TMEM SF 寻址 | MMA warp：每 UMMA-K 步 TMEM 列 +4、`sf_id = 0` | 对照 PTX ISA 中 `tcgen05.mma ... .block16` 对 scale operand 的描述。模型是"一条 `.block16` 恰好消费一个 128×4 atom"。 |
 | 3 | packed FP4 的 SMEM 形态 | transform 写 packed；host 用 `fp4_unpacked_smem=false` | DeepGEMM 自己的 FP4 路径用的是 **unpacked** SMEM 变体（`float_e2m1_unpacksmem_t`）。需确认 UMMA 能按 64 B swizzle 读真正打包的 SMEM。若不能，transform 的写出格式要跟着改。 |
-| 4 | `cvt.rn.satfinite.e2m1x2.f32` 的操作数顺序 | `ptx/tcgen05_nvfp4.cuh` | 当前假设第一个参数进高 nibble。一条指令即可验：转一对已知值，读回字节。错了表现为块内相邻元素两两互换。 |
+| 4 | `cvt.rn.satfinite.e2m1x2.f32` 的操作数顺序 | `ptx/tcgen05.cuh` | 当前假设第一个参数进高 nibble。一条指令即可验：转一对已知值，读回字节。错了表现为块内相邻元素两两互换。 |
 | 5 | `cutlass::float_ue4m3_t` 是 NVFP4 的正确 SF 类型 | `make_instr_desc_block_scaled` | 初始化 `3rdparty/cutlass` 后 grep 即可确认；编译期就会暴露。 |
 
 第 5 条编译就能发现，第 4 条一条指令就能验，第 1 条有明确的隔离测试路径。
@@ -505,7 +505,63 @@ SwiGLU + 加权 reduce。而本 harness 的其他 backend 都是**一个 expert 
 
 ---
 
-## 12. 后续方向
+## 12. 依赖解耦与目录重构
+
+最初的实现直接 include DeepGEMM 的头文件，host 侧还用了 `../../../3rdparty/DeepGEMM/csrc/...`
+这种相对路径。这有两个实际问题：源文件不可移动（换目录就断），以及 `nvfp4_gemm` 无法脱离
+DeepGEMM 的 checkout 构建。
+
+### 12.1 device 侧：把用到的部分 vendor 进来
+
+先盘点依赖面，发现并不大：`PatternVisitor`、`ceil_div`/`constexpr_align`/`fast_rcp`/
+`cast_into_bf16_and_pack`、`st_shared`/`ld_shared`、`get_lane_idx`/`exchange`、
+tcgen05 的两个 fence、UMMA descriptor 构造、`tma::copy`、以及 Scheduler。
+
+于是按实际用量裁剪后 vendor 到 `include/nvfp4_gemm/{common,ptx,mma,scheduler}`，
+每个文件头部注明源自 DeepGEMM 的哪个文件（MIT）以及裁掉了什么。裁剪不是照抄：
+
+- **Scheduler** 从 329 行减到约 150 行——去掉 k-grouped、psum layout、SM90 的
+  multicast 记账，并把 `IndexType` 参数去掉（本 kernel 只有 MN 一种用法）。
+  同时把 expert 号的取法收进 `get_expert_idx()`，原本这段逻辑散在 epilogue 里。
+- **mma/sm100.cuh** 只保留 K-major packed-FP4 一条路径，并且用
+  `make_packed_fp4_desc` + `advance_packed_fp4_desc_lo` 替换了通用版本——
+  后者按 `sizeof(dtype_t)` 推进而不除 pack factor，对 E2M1 会多推进一倍（第 2 节）。
+  裁剪之后这个坑在类型层面就不存在了。
+- **tma_copy.cuh** 只留 2D 单 CTA 路径（无 multicast、无 3D）。
+
+### 12.2 host 侧：自己写一份最小 JIT
+
+`src/jit/compiler.hpp` 约 200 行：生成 `.cu` → 调 nvcc → 按内容哈希缓存 cubin →
+`cuModuleLoad`。缓存键包含生成的源码、编译 flag 和 nvcc 版本，所以改模板参数、改头文件、
+换工具链都会触发重编。写临时文件再 `rename`，避免并发进程读到写了一半的产物。
+
+`src/jit/launch.hpp` 用 `cuLaunchKernelEx` + PDL 属性；`src/runtime/` 放设备属性查询、
+TMA tensor map 构造和异常。
+
+CUDA ≥ 12.9 的检查从"文档里的一句话"变成了 `compiler.hpp` 里的硬断言，
+因为低版本发不出 family target，cubin 在 B300 上根本加载不了。
+
+### 12.3 目录
+
+```
+include/nvfp4_gemm/   device 代码，只依赖 CUTLASS
+src/                  host 代码，无 3rdparty 相对路径
+python/nvfp4_gemm/    Python 包
+tests/{python,standalone}/
+benchmarks/
+3rdparty/cutlass      必需
+3rdparty/DeepGEMM     可选，仅 benchmark 基线用
+```
+
+### 12.4 DeepGEMM 现在是什么关系
+
+不再是构建依赖。它留在树里只有一个用途：`mxfp8_mxfp4` benchmark 基线需要它的
+grouped GEMM 和 `per_token_cast_to_fp4`（第 11.4 节说明了为什么 NVFP4 基线不能用它）。
+`develop.sh`、`setup.py`、`scripts/build.sh` 都不再查找它。
+
+---
+
+## 13. 后续方向
 
 按预期收益排序：
 

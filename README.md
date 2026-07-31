@@ -1,7 +1,7 @@
 # nvfp4-cutlass
 
-Fused **BF16 x NVFP4** grouped-MoE GEMM for SM100/SM103 (B200/B300), built on the
-DeepGEMM kernel skeleton.
+Fused **BF16 x NVFP4** grouped-MoE GEMM for SM100/SM103 (B200/B300). CUTLASS is
+its only dependency.
 
 BF16 activations are decomposed *inside the GEMM mainloop* into two NVFP4 passes
 -- a most-significant pass plus a residual pass -- and both are multiplied against
@@ -28,10 +28,12 @@ Requires CUDA >= 12.9 (the NVFP4 UMMA spelling and the `sm_100f` family target
 both need it; `sm_100a` will not load on a B300), a Blackwell GPU, and PyTorch.
 
 ```bash
-git submodule update --init --recursive --depth 1
+git submodule update --init --depth 1 3rdparty/cutlass
 ./develop.sh                       # build the extension, link the JIT include root
-python tests/test_gemm.py          # end-to-end correctness
-python tests/test_gemm.py --bench  # and timing
+
+export PYTHONPATH=$PWD/python
+python tests/python/test_gemm.py          # end-to-end correctness
+python tests/python/test_gemm.py --bench  # and timing
 ```
 
 Production use:
@@ -48,8 +50,9 @@ d = torch.empty(m, n, dtype=torch.bfloat16, device='cuda')
 nvfp4_gemm.m_grouped_bf16_dual_nvfp4_gemm_contiguous(a, b, sfb, gw, d, m_indices)
 ```
 
-Kernels are JIT-compiled on first use through DeepGEMM's compiler and cached in
-`~/.deep_gemm`, so there is no CUDA build at install time.
+Kernels are JIT-compiled on first use and cached in `~/.nvfp4_gemm`, so there is
+no CUDA build at install time. Set `NVFP4_JIT_DEBUG=1` to see the nvcc command
+and `NVFP4_JIT_CACHE_DIR` to relocate the cache.
 
 ## Benchmarks
 
@@ -120,29 +123,52 @@ future update into a conflict.
 
 ## Repository layout
 
-| Path | Contents |
-| --- | --- |
-| `include/nvfp4_gemm/impls/sm100_bf16_dual_nvfp4_gemm.cuh` | The fused kernel (Algorithm 2) |
-| `include/nvfp4_gemm/transform/dual_nvfp4.cuh` | Algorithm 1 plus the SMEM swizzle addressing it needs |
-| `include/nvfp4_gemm/ptx/tcgen05_nvfp4.cuh` | NVFP4 `block16` UMMA and the FP4/E4M3 conversion intrinsics |
-| `include/nvfp4_gemm/epilogue/sm100_store_cd_gscale.cuh` | Epilogue store with the per-expert `G_W` multiply |
-| `csrc/jit_kernels/impls/sm100_bf16_dual_nvfp4_gemm.hpp` | Host-side JIT launcher and config |
-| `csrc/apis/gemm.hpp`, `csrc/python_api.cpp` | pybind entry points |
-| `nvfp4_gemm/layout.py` | Weight quantization and the NVFP4 physical layouts |
-| `tests/test_gemm.py` | Production end-to-end test (needs a GPU) |
-| `tests/test_layout.py` | Layout tests (CPU) |
-| `tests/reference/dual_nvfp4.py` | Executable numerics specification (CPU) |
-| `tests/test_dual_nvfp4_reference.py` | Numerics tests (CPU) |
-| `tests/standalone/` | Torch-free bring-up harness |
+```
+include/nvfp4_gemm/     device code -- CUTLASS is its only dependency
+  impls/                the fused kernel (Algorithm 2)
+  transform/            Algorithm 1 and the SMEM swizzle addressing it needs
+  epilogue/             TMEM -> SMEM -> TMA store, with the per-expert G_W multiply
+  mma/                  UMMA shared-memory descriptors
+  ptx/                  tcgen05 (incl. the NVFP4 MMA), FP4/E4M3 conversions, ld/st
+  scheduler/            persistent output-tile scheduler
+  common/               macros, math, types, TMA copy, small utilities
 
-## What DeepGEMM provides, and what had to be added
+src/                    host code -- no relative reach into 3rdparty/
+  jit/                  generate .cu, drive nvcc, cache and load the cubin, launch
+  runtime/              device properties, TMA tensor maps, exceptions
+  kernels/              tile config, descriptor construction, launch
+  api.hpp               argument validation
+  python_api.cpp        pybind module
 
-The kernel follows `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh`
-closely: the persistent `sched::Scheduler`, the ring-buffer barrier discipline,
-the lane-broadcast trick for per-stage UMMA descriptors, the UTCCP scale path,
-and the swizzled TMEM->SMEM->TMA store epilogue are all DeepGEMM's.
+python/nvfp4_gemm/      Python package (layout.py holds the physical layouts)
+tests/python/           GPU end-to-end, CPU layout and numerics tests
+tests/standalone/       torch-free, JIT-free bring-up harness
+benchmarks/             forward-chain comparison
+3rdparty/cutlass        required
+3rdparty/DeepGEMM       optional, benchmark baseline only
+```
 
-Four things are not in DeepGEMM and are new here:
+## Dependencies
+
+**CUTLASS only.** `include/nvfp4_gemm/` and `src/` reference no other project:
+CuTe's UMMA descriptors, the cluster barriers, the TMEM allocator and the UTCCP /
+TMEM-load atoms come from CUTLASS, and nothing else is reached into.
+
+The design started from DeepGEMM's `sm100_fp8_fp4_gemm_1d1d.cuh`, and the pieces
+this kernel needed -- the persistent scheduler, the ring-buffer barrier
+discipline, the lane-broadcast trick for per-stage UMMA descriptors, the TMA copy
+helper, and a handful of math/PTX primitives -- are **vendored** under
+`include/nvfp4_gemm/{common,ptx,mma,scheduler}` rather than included from a
+submodule. Each vendored file carries an attribution header naming the DeepGEMM
+file it derives from (MIT, Copyright (c) 2025 DeepSeek) and what was trimmed.
+
+`3rdparty/DeepGEMM` remains in the tree, but only as an **optional benchmark
+baseline** for the MXFP8 x MXFP4 comparison. Nothing in the build path touches
+it, and `./develop.sh` and `scripts/build.sh` no longer look for it.
+
+## What had to be written from scratch
+
+Four things had no counterpart to vendor:
 
 1. **NVFP4 UMMA.** DeepGEMM ships MXFP4 only (`kind::mxf4.block_scale.block32`,
    UE8M0 scales). NVFP4 is block 16 with E4M3 scales, a different operand kind:
@@ -223,7 +249,8 @@ nvcc cannot emit family targets at all.
 
 ## Accuracy
 
-`tests/test_dual_nvfp4_reference.py` and `tests/test_layout.py` run on CPU and pass:
+`tests/python/test_dual_nvfp4_reference.py` and `tests/python/test_layout.py` run
+on CPU and pass:
 
 ```
 dual vs single pass:  0.09519 -> 0.01205 relative L2  (7.9x better)
@@ -265,7 +292,7 @@ implementation encodes an assumption that could not be checked offline:
    DeepGEMM's own FP4 path uses the *unpacked* SMEM variant, so confirm UMMA reads
    the packed layout with a 64 B swizzle as assumed.
 4. **`cvt.rn.satfinite.e2m1x2.f32` operand order** -- which argument lands in the
-   high nibble. `ptx/tcgen05_nvfp4.cuh` assumes first argument -> high nibble.
+   high nibble. `ptx/tcgen05.cuh` assumes first argument -> high nibble.
 5. **The swizzle replication** in `swizzled_byte_offset`. The transform warps read
    A with plain `LDS`, so they reproduce the TMA swizzle by hand; a mismatch is
    silent and produces wrong numbers, not a fault.
@@ -274,7 +301,7 @@ Item 1 fails at compile time, so `scripts/build.sh --check-only` settles it.
 Items 4 and 5 both surface in `scripts/run.sh`, and their signatures differ: a
 wrong `cvt` operand order swaps adjacent element pairs, while a wrong swizzle
 corrupts whole rows. Items 2 and 3 need either the PTX ISA text or a run of
-`tests/test_gemm.py`.
+`tests/python/test_gemm.py`.
 
 ## Next steps
 
@@ -291,7 +318,8 @@ corrupts whole rows. Items 2 and 3 need either the PTX ISA text or a run of
 ## Running the reference tests
 
 ```bash
-python3 tests/test_dual_nvfp4_reference.py
+PYTHONPATH=$PWD/python python3 tests/python/test_dual_nvfp4_reference.py
+PYTHONPATH=$PWD/python python3 tests/python/test_layout.py
 ```
 
 Requires only PyTorch (CPU is fine).

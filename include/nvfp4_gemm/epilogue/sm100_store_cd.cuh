@@ -2,16 +2,15 @@
 
 #include <cute/atom/copy_traits_sm100.hpp>
 
-#include <deep_gemm/common/math.cuh>
-#include <deep_gemm/common/types.cuh>
-#include <deep_gemm/common/utils.cuh>
-#include <deep_gemm/ptx/ld_st.cuh>
-#include <deep_gemm/ptx/tcgen05.cuh>
+#include <nvfp4_gemm/common/math.cuh>
+#include <nvfp4_gemm/common/types.cuh>
+#include <nvfp4_gemm/common/utils.cuh>
+#include <nvfp4_gemm/ptx/ld_st.cuh>
+#include <nvfp4_gemm/ptx/tcgen05.cuh>
 
 namespace nvfp4_gemm::epilogue {
 
-using deep_gemm::GemmType;
-using deep_gemm::utils::PatternVisitor;
+using utils::PatternVisitor;
 
 /// Epilogue store with a per-expert FP32 global weight scale.
 ///
@@ -30,12 +29,12 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
 {
     constexpr uint32_t kNumBankGroupBytes    = 16;
     constexpr uint32_t kNumElemsPerBankGroup = kNumBankGroupBytes / sizeof(cd_dtype_t);
-    DG_STATIC_ASSERT(kSwizzleCDMode > 0, "TMA D must be swizzled");
-    DG_STATIC_ASSERT(STORE_BLOCK_N % kNumElemsPerBankGroup == 0, "Invalid swizzling");
-    DG_STATIC_ASSERT(BLOCK_M % STORE_BLOCK_M == 0, "Invalid block sizes");
-    DG_STATIC_ASSERT(BLOCK_N % STORE_BLOCK_N == 0, "Invalid block sizes");
-    DG_STATIC_ASSERT(cute::is_same_v<cd_dtype_t, cutlass::bfloat16_t>,
-                     "Dual-NVFP4 GEMM only stores BF16");
+    NVFP4_STATIC_ASSERT(kSwizzleCDMode > 0, "TMA D must be swizzled");
+    NVFP4_STATIC_ASSERT(STORE_BLOCK_N % kNumElemsPerBankGroup == 0, "Invalid swizzling");
+    NVFP4_STATIC_ASSERT(BLOCK_M % STORE_BLOCK_M == 0, "Invalid block sizes");
+    NVFP4_STATIC_ASSERT(BLOCK_N % STORE_BLOCK_N == 0, "Invalid block sizes");
+    NVFP4_STATIC_ASSERT(cute::is_same_v<cd_dtype_t, cutlass::bfloat16_t>,
+                        "Dual-NVFP4 GEMM only stores BF16");
 
     auto advance_store_pipeline = [&]() {
         tma_stage_idx = (tma_stage_idx + 1) % kNumTMAStoreStages;
@@ -74,7 +73,7 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
                                      row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
 
                 uint32_t values[kNumElemsPerBankGroup];
-                DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8, "Invalid type");
+                NVFP4_STATIC_ASSERT(kNumElemsPerBankGroup == 8, "Invalid type");
                 cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
                                                       values[0],
                                                       values[1],
@@ -92,19 +91,19 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
                 for (uint32_t j = 0; j < kNumElemsPerBankGroup; ++j)
                     scaled[j] = *reinterpret_cast<float*>(&values[j]) * global_scale;
 
-                deep_gemm::ptx::st_shared(
+                ptx::st_shared(
                     smem_ptr,
-                    deep_gemm::math::cast_into_bf16_and_pack(scaled[0], scaled[1]),
-                    deep_gemm::math::cast_into_bf16_and_pack(scaled[2], scaled[3]),
-                    deep_gemm::math::cast_into_bf16_and_pack(scaled[4], scaled[5]),
-                    deep_gemm::math::cast_into_bf16_and_pack(scaled[6], scaled[7]));
+                    math::cast_into_bf16_and_pack(scaled[0], scaled[1]),
+                    math::cast_into_bf16_and_pack(scaled[2], scaled[3]),
+                    math::cast_into_bf16_and_pack(scaled[4], scaled[5]),
+                    math::cast_into_bf16_and_pack(scaled[6], scaled[7]));
             }
 
             // Release the accumulator as early as possible so the MMA warp can
             // start the next block while this store drains.
             if (w == kNumMWaves - 1 and s == kNumStores - 1)
             {
-                deep_gemm::ptx::tcgen05_before_thread_sync();
+                ptx::tcgen05_before_thread_sync();
                 tmem_empty_barrier->arrive(0u);
             }
 

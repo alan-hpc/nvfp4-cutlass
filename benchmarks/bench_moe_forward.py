@@ -50,7 +50,7 @@ def build_problem_inputs(problem: Problem, device: str, seed: int = 0):
     w = torch.randn(problem.num_experts, problem.n, problem.k,
                     dtype=torch.bfloat16, device=device) * 0.5
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'python'))
     from nvfp4_gemm.layout import make_m_indices
     m_indices = make_m_indices([problem.m_per_expert] * problem.num_experts, device=device)
     return a, w, m_indices

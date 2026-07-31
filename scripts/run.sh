@@ -12,7 +12,7 @@
 # End-to-end correctness is the production path's job:
 #
 #   ./develop.sh
-#   python tests/test_gemm.py [--bench]
+#   PYTHONPATH=$PWD/python python tests/python/test_gemm.py [--bench]
 #
 set -uo pipefail
 
@@ -38,7 +38,7 @@ printf '%.0s-' {1..72}; echo
 if "$BUILD/test_transform"; then
     echo
     say "transform stage OK"
-    say "next: ./develop.sh && python tests/test_gemm.py"
+    say "next: ./develop.sh && PYTHONPATH=\$PWD/python python tests/python/test_gemm.py"
     exit 0
 else
     rc=$?

@@ -2,9 +2,9 @@
 #
 # Build the dual-NVFP4 kernel and its standalone hardware tests.
 #
-# The tests are deliberately free of PyTorch and of DeepGEMM's JIT layer: they
-# build TMA descriptors with the driver API directly, so bring-up on a B300 only
-# needs nvcc and a GPU.
+# The standalone test is deliberately free of PyTorch and of the JIT: it builds
+# TMA descriptors with the driver API directly, so bring-up on a B300 needs only
+# nvcc and a GPU.
 #
 #   ./scripts/build.sh                 # compile-check + build both tests
 #   ./scripts/build.sh --check-only    # just instantiate the kernel, no binaries
@@ -55,8 +55,8 @@ if (( NVCC_MAJOR < 12 || (NVCC_MAJOR == 12 && NVCC_MINOR < 9) )); then
 fi
 
 # ---------------------------------------------------------------- submodules --
+# CUTLASS is the only third-party dependency of the kernel itself.
 CUTLASS_INC="$ROOT/3rdparty/cutlass/include"
-DEEPGEMM_INC="$ROOT/3rdparty/DeepGEMM/deep_gemm/include"
 
 if [[ ! -f "$CUTLASS_INC/cute/tensor.hpp" ]]; then
     die "CUTLASS headers missing at $CUTLASS_INC
@@ -64,9 +64,6 @@ if [[ ! -f "$CUTLASS_INC/cute/tensor.hpp" ]]; then
        (behind a flaky proxy, retry a few times; a half-finished clone leaves
         3rdparty/cutlass empty but .git/modules/3rdparty/cutlass populated)"
 fi
-[[ -f "$DEEPGEMM_INC/deep_gemm/common/math.cuh" ]] \
-    || die "DeepGEMM headers missing at $DEEPGEMM_INC
-       run: git submodule update --init --depth 1 3rdparty/DeepGEMM"
 
 # --------------------------------------------------------------------- arch --
 if [[ -z "$ARCH" ]]; then
@@ -94,7 +91,6 @@ NVCC_FLAGS=(
     --expt-relaxed-constexpr
     --expt-extended-lambda
     -I"$CUTLASS_INC"
-    -I"$DEEPGEMM_INC"
     -I"$ROOT/include"
     --diag-suppress=39,161,174,177,186,940
     -Xcompiler -Wno-deprecated-declarations,-Wno-abi
@@ -131,8 +127,8 @@ compile_check
 
 if (( ! CHECK_ONLY )); then
     # Only the transform test lives here.  End-to-end GEMM correctness goes
-    # through the production path instead (./develop.sh && python tests/test_gemm.py),
-    # so there is no second full GEMM harness to keep in sync.
+    # through the production path instead (./develop.sh, then
+    # tests/python/test_gemm.py), so there is no second GEMM harness to maintain.
     build_test test_transform
 fi
 

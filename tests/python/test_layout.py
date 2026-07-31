@@ -16,7 +16,7 @@ import torch
 # Load layout.py by path rather than as `nvfp4_gemm.layout`: the package's
 # __init__ imports the compiled extension, and these tests are pure Python.
 _spec = importlib.util.spec_from_file_location(
-    'nvfp4_layout', Path(__file__).resolve().parent.parent / 'nvfp4_gemm' / 'layout.py')
+    'nvfp4_layout', Path(__file__).resolve().parents[2] / 'python' / 'nvfp4_gemm' / 'layout.py')
 layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(layout)
 
