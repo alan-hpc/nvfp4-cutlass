@@ -8,7 +8,7 @@
 #
 #   ./scripts/build.sh                 # compile-check + build both tests
 #   ./scripts/build.sh --check-only    # just instantiate the kernel, no binaries
-#   ./scripts/build.sh --arch sm_103a  # override arch detection
+#   ./scripts/build.sh --arch "--gpu-architecture=sm_103a"   # skip the probe
 #   ./scripts/build.sh --ptx --sass    # also dump PTX / SASS for inspection
 #
 set -euo pipefail
@@ -16,7 +16,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
 
-ARCH=""
+ARCH_FLAGS=""
 CHECK_ONLY=0
 WANT_PTX=0
 WANT_SASS=0
@@ -24,7 +24,7 @@ JOBS="$(nproc 2>/dev/null || echo 4)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --arch)       ARCH="$2"; shift 2 ;;
+        --arch)       ARCH_FLAGS="$2"; shift 2 ;;
         --check-only) CHECK_ONLY=1; shift ;;
         --ptx)        WANT_PTX=1; shift ;;
         --sass)       WANT_SASS=1; shift ;;
@@ -66,33 +66,82 @@ if [[ ! -f "$CUTLASS_INC/cute/tensor.hpp" ]]; then
 fi
 
 # --------------------------------------------------------------------- arch --
-if [[ -z "$ARCH" ]]; then
-    if command -v nvidia-smi >/dev/null; then
-        CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' .')"
-    else
-        CC=""
+# The tcgen05 NVFP4 MMA only exists on architecture-specific ("a") or
+# architecture-family ("f") targets. A plain `sm_100` has none of it, and how a
+# given nvcc spells the suffix has moved between releases -- CUDA 13.3 silently
+# drops it from `--gpu-architecture=sm_100f`, leaving ptxas on `.target sm_100`
+# and rejecting every tcgen05 instruction.
+#
+# So probe instead of assume: assemble the actual instruction and keep the first
+# spelling that survives.
+probe_arch() {
+    local probe_src="$BUILD/arch_probe.cu"
+    mkdir -p "$BUILD"
+    cat > "$probe_src" <<'PROBE'
+__global__ void probe(unsigned long long a, unsigned long long b, unsigned c, unsigned d)
+{
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %3, 0;\n\t"
+        "tcgen05.fence::before_thread_sync;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 [%2], %0, %1, %3, [%2], [%2], p;\n\t"
+        "}\n" ::"l"(a), "l"(b), "r"(c), "r"(d));
+}
+PROBE
+
+    local candidate
+    for candidate in "$@"; do
+        if nvcc $candidate -cubin -o /dev/null "$probe_src" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ -z "$ARCH_FLAGS" ]]; then
+    say "probing which architecture flag assembles the NVFP4 MMA"
+    # Family target first: one cubin then runs on both B200 and B300. Fall back
+    # to the arch-specific targets, which are narrower but always available.
+    # Family targets first (one cubin runs across the family), then the
+    # architecture-specific ones. Both 100f and 103f are tried because which
+    # capability roots the Blackwell family has moved between CUDA releases.
+    ARCH_FLAGS="$(probe_arch \
+        "--gpu-architecture=sm_100f" \
+        "-gencode=arch=compute_100f,code=sm_100f" \
+        "--gpu-architecture=sm_103f" \
+        "-gencode=arch=compute_103f,code=sm_103f" \
+        "--gpu-architecture=sm_103a" \
+        "-gencode=arch=compute_103a,code=sm_103a" \
+        "--gpu-architecture=sm_100a" \
+        "-gencode=arch=compute_100a,code=sm_100a" || true)"
+    if [[ -z "$ARCH_FLAGS" ]]; then
+        die "no architecture flag assembled 'tcgen05.mma ... kind::mxf4nvf4.block16'.
+       Tried sm_100f, sm_103f, sm_103a, sm_100a in both --gpu-architecture and
+       -gencode spellings. Needs CUDA >= 12.9 and a Blackwell target.
+       Reproduce by hand:  nvcc --gpu-architecture=sm_103a -cubin -o /dev/null $BUILD/arch_probe.cu
+       or pass the working flags with --arch '<flags>'."
     fi
-    case "$CC" in
-        100|103) ARCH="sm_100f" ;;   # B200 and B300 share the sm_100 family
-        "")      ARCH="sm_100f"; warn "no GPU detected, defaulting to $ARCH" ;;
-        *)       die "compute capability $CC is not SM100/SM103; this kernel needs Blackwell" ;;
+    say "using: $ARCH_FLAGS"
+    case "$ARCH_FLAGS" in
+        *100f*) ;;
+        *) warn "not a family target -- the cubin will run only on this exact architecture" ;;
     esac
-    [[ -n "$CC" ]] && say "detected compute capability ${CC:0:2}.${CC:2}"
 fi
-say "target architecture: $ARCH"
 
 # ------------------------------------------------------------------- compile --
 mkdir -p "$BUILD"
 
 NVCC_FLAGS=(
     -std=c++20
-    --gpu-architecture="$ARCH"
+    $ARCH_FLAGS
     -O3
     --expt-relaxed-constexpr
     --expt-extended-lambda
     -I"$CUTLASS_INC"
     -I"$ROOT/include"
-    --diag-suppress=39,161,174,177,186,940
+    --diag-suppress=39,161,174,177,186,550,940
     -Xcompiler -Wno-deprecated-declarations,-Wno-abi
     -lcuda
 )

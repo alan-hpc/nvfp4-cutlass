@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <cuda.h>
 
@@ -68,11 +69,70 @@ using KernelPtr = std::shared_ptr<Kernel>;
 class Compiler
 {
     fs::path                                   cuda_home;
+    std::string                                arch_flags;
     fs::path                                   include_root;
     fs::path                                   cache_dir;
     std::string                                flags;
     std::string                                signature;
     std::unordered_map<std::string, KernelPtr> loaded;
+
+    /// Find an architecture flag that actually assembles the NVFP4 MMA.
+    ///
+    /// The tcgen05 NVFP4 instructions exist only on architecture-specific ("a")
+    /// or architecture-family ("f") targets, and which spelling a given nvcc
+    /// honours has moved between releases -- CUDA 13.3 drops the suffix from
+    /// `--gpu-architecture=sm_100f` and leaves ptxas on a plain `sm_100`, where
+    /// every tcgen05 instruction is rejected. Probing once at init costs one
+    /// tiny nvcc invocation and removes the guess.
+    std::string resolve_arch_flags()
+    {
+        if (const auto override_flags = get_env("NVFP4_ARCH_FLAGS"); not override_flags.empty())
+            return override_flags;
+
+        const auto probe_path = cache_dir / "arch_probe.cu";
+        {
+            std::ofstream out(probe_path);
+            out << "__global__ void probe(unsigned long long a, unsigned long long b, unsigned c, unsigned d)\n"
+                << "{\n"
+                << "    asm volatile(\n"
+                << "        \"{\\n\\t\"\n"
+                << "        \".reg .pred p;\\n\\t\"\n"
+                << "        \"setp.ne.b32 p, %3, 0;\\n\\t\"\n"
+                << "        \"tcgen05.fence::before_thread_sync;\\n\\t\"\n"
+                << "        \"tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                   "[%2], %0, %1, %3, [%2], [%2], p;\\n\\t\"\n"
+                << "        \"}\\n\" ::\"l\"(a), \"l\"(b), \"r\"(c), \"r\"(d));\n"
+                << "}\n";
+        }
+
+        // Family targets first, so one cubin covers B200 and B300; then the
+        // architecture-specific fallbacks.
+        const std::vector<std::string> candidates = {
+            "--gpu-architecture=sm_100f",
+            "-gencode=arch=compute_100f,code=sm_100f",
+            "--gpu-architecture=sm_103f",
+            "-gencode=arch=compute_103f,code=sm_103f",
+            "--gpu-architecture=sm_103a",
+            "-gencode=arch=compute_103a,code=sm_103a",
+            "--gpu-architecture=sm_100a",
+            "-gencode=arch=compute_100a,code=sm_100a",
+        };
+        for (const auto& candidate : candidates)
+        {
+            const auto command =
+                (cuda_home / "bin" / "nvcc").string() + " " + candidate + " -cubin -o /dev/null " + probe_path.string();
+            if (run_command(command).first == 0)
+            {
+                if (not get_env("NVFP4_JIT_DEBUG").empty())
+                    std::printf("nvfp4_gemm JIT: architecture flags '%s'\n", candidate.c_str());
+                return candidate;
+            }
+        }
+        NVFP4_HOST_ASSERT_MSG(false,
+                              "no architecture flag assembles tcgen05.mma kind::mxf4nvf4.block16; "
+                              "needs CUDA >= 12.9 on Blackwell, or set NVFP4_ARCH_FLAGS");
+        return {};
+    }
 
 public:
     /// `include_root` is the single directory the generated code is compiled
@@ -93,18 +153,19 @@ public:
         int major = 0, minor = 0;
         if (const auto pos = version_text.find("release "); pos != std::string::npos)
             std::sscanf(version_text.c_str() + pos + 8, "%d.%d", &major, &minor);
-        // The NVFP4 UMMA spelling and the sm_100f family target both need 12.9,
-        // and without a family target the cubin cannot load on a B300 at all.
+        // `kind::mxf4nvf4.block16` and the architecture-family targets both
+        // arrived in 12.9; older nvcc can only emit sm_100a, which will not load
+        // on a B300.
         NVFP4_HOST_ASSERT_MSG(major > 12 or (major == 12 and minor >= 9),
                               "CUDA >= 12.9 required, found " + std::to_string(major) + "." + std::to_string(minor));
         signature = "nvcc" + std::to_string(major) + "." + std::to_string(minor);
 
-        const auto arch = device_runtime->get_arch(/*support_arch_family=*/true);
+        arch_flags = resolve_arch_flags();
 
         std::ostringstream oss;
-        oss << " -std=c++20 -O3 --gpu-architecture=sm_" << arch << " -cubin"
+        oss << " -std=c++20 -O3 " << arch_flags << " -cubin"
             << " --expt-relaxed-constexpr --expt-extended-lambda"
-            << " --diag-suppress=39,161,174,177,186,940"
+            << " --diag-suppress=39,161,174,177,186,550,940"
             << " -I" << include_root.string() << " -I" << (cuda_home / "include").string();
         if (not get_env("NVFP4_JIT_DEBUG").empty())
             oss << " --ptxas-options=--verbose";

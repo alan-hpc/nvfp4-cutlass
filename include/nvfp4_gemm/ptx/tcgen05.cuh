@@ -10,6 +10,7 @@
 
 #include <cuda/std/cstdint>
 #include <cuda_fp16.h>
+#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 
 #include <nvfp4_gemm/common/macros.cuh>
@@ -65,27 +66,28 @@ CUTLASS_DEVICE void tcgen05_after_thread_sync()
     asm volatile("tcgen05.fence::after_thread_sync;");
 }
 
-/// Hardware FP32 -> E2M1 conversion, two elements per instruction.
+/// FP32 -> E2M1, two elements per instruction.
 ///
-/// `cvt.rn.satfinite.e2m1x2.f32 d, a, b` packs `a` into the high nibble and `b`
-/// into the low nibble of the destination byte. The argument names make that
-/// order explicit at every call site.
+/// These go through the CUDA headers' intrinsics rather than hand-written PTX.
+/// `cvt.rn.satfinite.e2m1x2.f32` takes a `.b8` destination and
+/// `cvt.rn.f16x2.e2m1x2` a `.b8` source, and inline asm has no 8-bit constraint
+/// class -- writing them by hand needs a `.reg .b8` temporary plus explicit
+/// widening moves, which is exactly what these intrinsics already do.
+///
+/// Using them also settles the packing order by definition instead of by
+/// assumption: `float2{x, y}` puts `x` in the low nibble and `y` in the high
+/// nibble, matching how UMMA reads the operand back.
 CUTLASS_DEVICE uint32_t cvt_e2m1x2(const float& hi_nibble, const float& lo_nibble)
 {
-    uint16_t packed;
-    asm volatile("cvt.rn.satfinite.e2m1x2.f32 %0, %1, %2;\n" : "=h"(packed) : "f"(hi_nibble), "f"(lo_nibble));
+    const __nv_fp4x2_storage_t packed =
+        __nv_cvt_float2_to_fp4x2(make_float2(lo_nibble, hi_nibble), __NV_E2M1, cudaRoundNearest);
     return static_cast<uint32_t>(packed) & 0xffu;
 }
 
-/// Hardware FP32 -> E4M3 conversion for a single value.
-///
-/// There is no scalar `cvt.rn.satfinite.e4m3.f32`, so convert a pair and drop
-/// the unused half.
+/// FP32 -> E4M3, one value.
 CUTLASS_DEVICE uint32_t cvt_e4m3(const float& x)
 {
-    uint16_t packed;
-    asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(packed) : "f"(0.0f), "f"(x));
-    return static_cast<uint32_t>(packed) & 0xffu;
+    return static_cast<uint32_t>(__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3)) & 0xffu;
 }
 
 /// Decode a packed E2M1 byte back into two FP16 values.
@@ -95,9 +97,9 @@ CUTLASS_DEVICE uint32_t cvt_e4m3(const float& x)
 /// the algorithm doc measures that as 25.76us -> 19.71us on the transform.
 CUTLASS_DEVICE uint32_t cvt_e2m1x2_to_f16x2(const uint32_t& packed)
 {
-    uint32_t result;
-    asm volatile("cvt.rn.f16x2.e2m1x2 %0, %1;\n" : "=r"(result) : "h"(static_cast<uint16_t>(packed & 0xffu)));
-    return result;
+    const __half2_raw halves =
+        __nv_cvt_fp4x2_to_halfraw2(static_cast<__nv_fp4x2_storage_t>(packed & 0xffu), __NV_E2M1);
+    return *reinterpret_cast<const uint32_t*>(&halves);
 }
 
 /// Decode an E4M3 byte to FP32.
@@ -108,8 +110,7 @@ CUTLASS_DEVICE uint32_t cvt_e2m1x2_to_f16x2(const uint32_t& packed)
 /// `amax / 6` is not exactly representable in E4M3.
 CUTLASS_DEVICE float cvt_e4m3_to_f32(const uint32_t& code)
 {
-    __nv_fp8_storage_t storage = static_cast<__nv_fp8_storage_t>(code & 0xffu);
-    return __half2float(__nv_cvt_fp8_to_halfraw(storage, __NV_E4M3));
+    return __half2float(__nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(code & 0xffu), __NV_E4M3));
 }
 
 }   // namespace nvfp4_gemm::ptx
