@@ -183,11 +183,14 @@ static void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         cute::UMMA::Major::K, a, m, k, config.block_m, config.block_k,
         static_cast<int>(a.stride(0)), 1, config.swizzle_a_mode);
 
-    // W: packed E2M1.  `fp4_unpacked_smem = false` keeps shared memory truly
-    // packed (two elements per byte), which is what the transform warps write
-    // for A0/A1 -- both UMMA operands must agree on the packing.
+    // W: packed E2M1.  `fp4_unpacked_smem = false` selects
+    // `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B`, which keeps shared memory truly
+    // packed (two elements per byte) -- that is what the transform warps write
+    // for A0/A1, and both UMMA operands must agree on the packing.  Note the
+    // global dims are in FP4 *elements*, while `b.stride(0)` is in bytes because
+    // the tensor is an int8 view.
     const auto tensor_map_b = deep_gemm::make_tma_2d_desc(
-        b, k / 2, n * num_groups, config.block_k / 2, config.block_n,
+        b, k, n * num_groups, config.block_k, config.block_n,
         static_cast<int>(b.stride(0)), config.swizzle_ab_mode, 0, false, false);
 
     const auto tensor_map_cd = deep_gemm::make_tma_cd_desc(

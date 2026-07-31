@@ -266,9 +266,15 @@ sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                 // produced on chip.
                 deep_gemm::tma::copy<BLOCK_K, BLOCK_M, kSwizzleAMode, __nv_bfloat16>(
                     &tensor_map_a, full_barriers[stage_idx], smem_a[stage_idx], k_idx, m_idx);
-                // W is packed E2M1: the TMA box counts *bytes* on K.
-                deep_gemm::tma::copy<BLOCK_K / 2, BLOCK_N, kSwizzleABMode, uint8_t>(
-                    &tensor_map_b, full_barriers[stage_idx], smem_b[stage_idx], k_idx / 2, n_idx);
+                // W is packed E2M1 under `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B`,
+                // whose global dims and coordinates are counted in *FP4 elements*
+                // even though shared memory receives two of them per byte.  With
+                // BLOCK_K == 128 the row is exactly one 64 B swizzle atom, so a
+                // single 2D copy covers it and no atom loop is needed.
+                cute::SM90_TMA_LOAD_2D::copy(
+                    &tensor_map_b, reinterpret_cast<uint64_t*>(full_barriers[stage_idx]),
+                    static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL),
+                    smem_b[stage_idx], k_idx, n_idx);
 
                 uint32_t num_arrival_bytes = SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE;
 

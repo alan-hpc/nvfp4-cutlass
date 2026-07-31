@@ -22,6 +22,48 @@ A1 = dec(q1) * s1        s1 = Q_e4m3(s0 * 2^-3)
                          q1 = Q_e2m1((x * rcp(s0) - dec(q0)) * 8)
 ```
 
+## Quick start
+
+Requires CUDA >= 12.9 (the NVFP4 UMMA spelling and the `sm_100f` family target
+both need it; `sm_100a` will not load on a B300), a Blackwell GPU, and PyTorch.
+
+```bash
+git submodule update --init --recursive --depth 1
+./develop.sh                       # build the extension, link the JIT include root
+python tests/test_gemm.py          # end-to-end correctness
+python tests/test_gemm.py --bench  # and timing
+```
+
+Production use:
+
+```python
+import torch, nvfp4_gemm
+
+# Offline: quantize weights into the kernel's physical layouts.
+b, sfb, gw = nvfp4_gemm.quantize_weight_nvfp4(w)          # w: (E, N, K) BF16
+
+# Online: BF16 activations in, BF16 out. A is never quantized to global memory.
+m_indices = nvfp4_gemm.make_m_indices([rows_per_expert] * num_experts, device='cuda')
+d = torch.empty(m, n, dtype=torch.bfloat16, device='cuda')
+nvfp4_gemm.m_grouped_bf16_dual_nvfp4_gemm_contiguous(a, b, sfb, gw, d, m_indices)
+```
+
+Kernels are JIT-compiled on first use through DeepGEMM's compiler and cached in
+`~/.deep_gemm`, so there is no CUDA build at install time.
+
+## Bring-up on new hardware
+
+Before trusting an end-to-end number, run the transform in isolation. It has no
+MMA, no UTCCP and no epilogue, so a failure points at exactly one thing:
+
+```bash
+./scripts/build.sh          # compile-check + build the standalone test
+./scripts/run.sh            # A-tile swizzle + Algorithm 1, checked per element
+```
+
+`./scripts/build.sh --ptx` additionally dumps PTX and greps it for the NVFP4 MMA,
+which is the fastest way to confirm `kind::mxf4nvf4` actually survived codegen.
+
 ## Repository layout
 
 | Path | Contents |
@@ -31,8 +73,13 @@ A1 = dec(q1) * s1        s1 = Q_e4m3(s0 * 2^-3)
 | `include/nvfp4_gemm/ptx/tcgen05_nvfp4.cuh` | NVFP4 `block16` UMMA and the FP4/E4M3 conversion intrinsics |
 | `include/nvfp4_gemm/epilogue/sm100_store_cd_gscale.cuh` | Epilogue store with the per-expert `G_W` multiply |
 | `csrc/jit_kernels/impls/sm100_bf16_dual_nvfp4_gemm.hpp` | Host-side JIT launcher and config |
+| `csrc/apis/gemm.hpp`, `csrc/python_api.cpp` | pybind entry points |
+| `nvfp4_gemm/layout.py` | Weight quantization and the NVFP4 physical layouts |
+| `tests/test_gemm.py` | Production end-to-end test (needs a GPU) |
+| `tests/test_layout.py` | Layout tests (CPU) |
 | `tests/reference/dual_nvfp4.py` | Executable numerics specification (CPU) |
-| `tests/test_dual_nvfp4_reference.py` | Numerics tests |
+| `tests/test_dual_nvfp4_reference.py` | Numerics tests (CPU) |
+| `tests/standalone/` | Torch-free bring-up harness |
 
 ## What DeepGEMM provides, and what had to be added
 
@@ -109,13 +156,25 @@ is a template parameter away from being flipped.
 writing operand tiles that the peer CTA's MMA consumes is a real extension, not a
 parameter flip, so it is left out rather than half-done.
 
+## Target architecture
+
+Compile for **`sm_100f`**. B200 (10.0) and B300 (10.3) share the SM100 family
+target, and `scripts/build.sh` selects it automatically. The kernel uses no
+sm_103-exclusive feature; its arch guard is `__CUDA_ARCH__ >= 1000`, and
+DeepGEMM's JIT independently resolves 10.3 to `sm_100f` as well.
+
+`sm_100a` is arch-specific to 10.0 and **will not load on a B300** -- which is
+why CUDA >= 12.9 is a hard requirement rather than a recommendation, since older
+nvcc cannot emit family targets at all.
+
 ## Accuracy
 
-`tests/test_dual_nvfp4_reference.py` runs on CPU and passes:
+`tests/test_dual_nvfp4_reference.py` and `tests/test_layout.py` run on CPU and pass:
 
 ```
 dual vs single pass:  0.09519 -> 0.01205 relative L2  (7.9x better)
 grouped GEMM vs ground truth: cosine 0.999926
+weight quantization roundtrip: rel L2 0.09547, cosine 0.995415
 ```
 
 On the doc's own ground-truth definition -- `C_ref = A_bf16 * (dec(W) * S_W * G_W)^T`
@@ -133,9 +192,10 @@ single NVFP4 activation pass.
 
 ## Status
 
-The Python reference is tested and passing. **The CUDA kernel has not been
-compiled or run**: this checkout has no CUTLASS (the `3rdparty/cutlass` submodule
-is not initialized), no `nvcc`, and no Blackwell GPU.
+The CPU-side tests -- numerics reference and physical layouts -- are passing.
+**The CUDA kernel has not been compiled or run**: the machine it was written on
+has no CUTLASS checkout, no `nvcc` and no Blackwell GPU, so `scripts/build.sh`
+has never been executed. Expect to fix compile errors on the first run.
 
 Before trusting the kernel, validate these on hardware. Each is a point where the
 implementation encodes an assumption that could not be checked offline:
@@ -156,9 +216,11 @@ implementation encodes an assumption that could not be checked offline:
    A with plain `LDS`, so they reproduce the TMA swizzle by hand; a mismatch is
    silent and produces wrong numbers, not a fault.
 
-Item 5 is the cheapest to test in isolation: TMA a known pattern into the A stage,
-run only the transform, copy A0/SFA0 back out, and compare against
-`tests/reference/dual_nvfp4.py`.
+Item 1 fails at compile time, so `scripts/build.sh --check-only` settles it.
+Items 4 and 5 both surface in `scripts/run.sh`, and their signatures differ: a
+wrong `cvt` operand order swaps adjacent element pairs, while a wrong swizzle
+corrupts whole rows. Items 2 and 3 need either the PTX ISA text or a run of
+`tests/test_gemm.py`.
 
 ## Next steps
 

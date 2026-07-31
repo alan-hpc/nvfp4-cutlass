@@ -5,3 +5,7 @@ build/
 dist/
 *.egg-info/
 .cache/
+
+# develop.sh artifacts
+/nvfp4_gemm/include/
+/nvfp4_gemm/_C*.so

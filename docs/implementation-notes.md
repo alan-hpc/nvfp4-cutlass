@@ -343,7 +343,92 @@ kernel **未经编译、未经运行**。以下五点是代码里编码了、但
 
 ---
 
-## 10. 后续方向
+## 10. 生产链路
+
+kernel 本身不是交付物的全部——要能在生产里被调用，需要一整条从 PyTorch 张量到 JIT 编译再到
+launch 的路径。这条路径完全复用 DeepGEMM 的 JIT，只把 kernel 和 launcher 换成我们的。
+
+```
+w (E,N,K) BF16 ──quantize_weight_nvfp4──> b / sfb / gw  （离线，一次）
+                                              │
+a (M,K) BF16 ─────────────────────────────────┤
+m_indices (M,) int32 ─────────────────────────┤
+                                              ▼
+              nvfp4_gemm.m_grouped_bf16_dual_nvfp4_gemm_contiguous
+                                              │
+                    csrc/apis/gemm.hpp  （形状/dtype 校验）
+                                              │
+        csrc/jit_kernels/impls/…hpp  （配置推导 + 4 个 TMA descriptor）
+                                              │
+              DeepGEMM Compiler  （生成 .cu → nvcc → cubin，缓存于 ~/.deep_gemm）
+                                              ▼
+                                     d (M,N) BF16
+```
+
+### 10.1 为什么直接复用 DeepGEMM 的 JIT
+
+`csrc/python_api.cpp` 直接 include DeepGEMM 的 `apis/runtime.hpp`，因此 `init` /
+`set_num_sms` / `set_tc_util` / `set_pdl` 这些都是同一套实现，NVCC 驱动、cubin 缓存、
+include 哈希、launch 路径全部共享。**没有第二套 JIT 需要同步**——这是选择在 DeepGEMM 骨架上
+做而不是从零写的直接收益之一。
+
+一个约束由此而来：`Compiler` 只用**一个** `-I`（`library_root_path / "include"`）。
+所以 `develop.sh` 把四个头文件命名空间软链到同一个根下：
+
+```
+nvfp4_gemm/include/{nvfp4_gemm, deep_gemm, cutlass, cute}
+```
+
+`setup.py` 的 `CustomBuildPy` 在打 wheel 时做同样的事（用 copytree 而非软链）。
+
+### 10.2 物理布局由 `nvfp4_gemm/layout.py` 负责
+
+kernel 的 TMA descriptor 描述的是具体的物理排布，host 侧必须逐字节对上：
+
+| 张量 | dtype / 形状 | 约束 |
+| --- | --- | --- |
+| `b` | int8 `(E·N, K/2)` | packed E2M1，元素 2i 在低 nibble、2i+1 在高 nibble |
+| `sfb` | int32 `(E·K/64, N)` | 一个 atom 一个 word，子块 j 在第 j 字节 |
+| `gw` | fp32 `(E,)` | 每 expert 一个，epilogue 消费 |
+| `m_indices` | int32 `(M,)` | 每行的 expert 号；每组必须 128 行对齐 |
+
+`sfb` 的 `(sf_k, n)` 转置和"子块 j 在第 j 字节"这两条，必须与 transform warp 写 SFA 的
+打包方式一致（第 3 节），否则两个 operand 会对不上哪个尺度属于哪个子块。
+`tests/test_layout.py` 逐字节验证了这两条，以及 nibble 顺序——这三者都属于
+"错了不会崩、只会算错"的类别。
+
+CPU 上实测：
+
+```
+ok  nibble packing: low = even element, high = odd element
+ok  SF atom words: sub-block j in byte j, laid out as (E*K/64, N)
+ok  weight roundtrip: rel L2 0.09547, cosine 0.995415
+```
+
+注意权重往返的 0.09547 / 0.995415：这正是**单遍** NVFP4 的固有误差，与第 8.1 节
+"仅权重量化"那一行（0.995438）互相印证。它不是 bug，是一遍 NVFP4 的代价。
+
+### 10.3 验收阈值
+
+`tests/test_gemm.py` 用 **cosine > 0.999** 对着文档定义的 ground truth 判定，并且在失败时
+按 cosine 的量级给出诊断方向：
+
+- `cosine ≈ 0.995` → A1 那一遍没进累加器（这正是单遍的分数）
+- `cosine < 0.9` → 布局问题而非算术问题，先去跑 `scripts/run.sh`
+
+### 10.4 两条测试路径的分工
+
+| 路径 | 依赖 | 覆盖 |
+| --- | --- | --- |
+| `scripts/build.sh` + `scripts/run.sh` | 只要 nvcc + GPU | 模板实例化、PTX 汇编、A swizzle、Algorithm 1 |
+| `./develop.sh` + `tests/test_gemm.py` | torch + JIT | 端到端数值、多形状、性能 |
+
+standalone 路径故意不依赖 PyTorch 和 JIT：新硬件上第一次 bring-up 时，把变量降到最少。
+它只保留 transform 隔离测试，端到端不再重复一份——两份全量 GEMM harness 是重复维护。
+
+---
+
+## 11. 后续方向
 
 按预期收益排序：
 
