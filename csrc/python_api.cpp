@@ -9,10 +9,11 @@
 #include "apis/gemm.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
-#define TORCH_EXTENSION_NAME _C
+#    define TORCH_EXTENSION_NAME _C
 #endif
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+{
     m.doc() = "Fused BF16 x NVFP4 dual-A GEMM for SM100/SM103";
 
     // `init`, `set_num_sms`, `set_tc_util`, `set_pdl`, ...

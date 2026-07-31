@@ -105,6 +105,19 @@ MMA, no UTCCP and no epilogue, so a failure points at exactly one thing:
 `./scripts/build.sh --ptx` additionally dumps PTX and greps it for the NVFP4 MMA,
 which is the fastest way to confirm `kind::mxf4nvf4` actually survived codegen.
 
+## Code style
+
+C++/CUDA sources follow `.clang-format` (LLVM base, Allman braces, 4-space
+indent, `ColumnLimit: 0`, aligned consecutive assignments and declarations):
+
+```bash
+./scripts/format.sh          # format in place
+./scripts/format.sh --check  # fail on unformatted files, for CI
+```
+
+`3rdparty/` is excluded on purpose -- reformatting a submodule would turn every
+future update into a conflict.
+
 ## Repository layout
 
 | Path | Contents |

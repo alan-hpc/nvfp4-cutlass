@@ -10,61 +10,80 @@
 using namespace nvfp4_gemm;
 
 // Default production shape: E=4 experts, N=1024, K=2048, tile 128x256x128.
-static void __instantiate_default() {
+static void __instantiate_default()
+{
     auto ptr = reinterpret_cast<void*>(&sm100_bf16_dual_nvfp4_gemm_impl<
-        /*SHAPE_N=*/1024, /*SHAPE_K=*/2048,
-        /*BLOCK_M=*/128, /*BLOCK_N=*/256, /*BLOCK_K=*/128,
-        /*kNumGroups=*/4,
-        /*kSwizzleAMode=*/128, /*kSwizzleABMode=*/64, /*kSwizzleCDMode=*/128,
-        /*kNumStages=*/2,
-        /*kNumTransformWarps=*/8,
-        /*kNumEpilogueThreads=*/128,
-        /*kNumSMs=*/148,
-        deep_gemm::GemmType::MGroupedContiguous,
-        transform::ScalePolicy::DerivedDiv8,
-        /*kEnableResidualPass=*/true>);
-    (void) ptr;
+                                       /*SHAPE_N=*/1024,
+                                       /*SHAPE_K=*/2048,
+                                       /*BLOCK_M=*/128,
+                                       /*BLOCK_N=*/256,
+                                       /*BLOCK_K=*/128,
+                                       /*kNumGroups=*/4,
+                                       /*kSwizzleAMode=*/128,
+                                       /*kSwizzleABMode=*/64,
+                                       /*kSwizzleCDMode=*/128,
+                                       /*kNumStages=*/2,
+                                       /*kNumTransformWarps=*/8,
+                                       /*kNumEpilogueThreads=*/128,
+                                       /*kNumSMs=*/148,
+                                       deep_gemm::GemmType::MGroupedContiguous,
+                                       transform::ScalePolicy::DerivedDiv8,
+                                       /*kEnableResidualPass=*/true>);
+    (void)ptr;
 }
 
 // A second shape, to make sure the derived constants really are derived:
 // BLOCK_N=128 flips `kNumEpilogueStages` from 1 to 2.
-static void __instantiate_small_n() {
+static void __instantiate_small_n()
+{
     auto ptr = reinterpret_cast<void*>(&sm100_bf16_dual_nvfp4_gemm_impl<
-        0, 0,
-        128, 128, 128,
-        4,
-        128, 64, 128,
-        3,
-        8,
-        128,
-        148,
-        deep_gemm::GemmType::MGroupedContiguous,
-        transform::ScalePolicy::ResidualAmax,
-        /*kEnableResidualPass=*/true>);
-    (void) ptr;
+                                       0,
+                                       0,
+                                       128,
+                                       128,
+                                       128,
+                                       4,
+                                       128,
+                                       64,
+                                       128,
+                                       3,
+                                       8,
+                                       128,
+                                       148,
+                                       deep_gemm::GemmType::MGroupedContiguous,
+                                       transform::ScalePolicy::ResidualAmax,
+                                       /*kEnableResidualPass=*/true>);
+    (void)ptr;
 }
 
 // Single-pass mode, so both branches of `kEnableResidualPass` get compiled.
-static void __instantiate_single_pass() {
+static void __instantiate_single_pass()
+{
     auto ptr = reinterpret_cast<void*>(&sm100_bf16_dual_nvfp4_gemm_impl<
-        1024, 2048,
-        128, 256, 128,
-        4,
-        128, 64, 128,
-        2,
-        8,
-        128,
-        148,
-        deep_gemm::GemmType::MGroupedContiguous,
-        transform::ScalePolicy::DerivedDiv8,
-        /*kEnableResidualPass=*/false>);
-    (void) ptr;
+                                       1024,
+                                       2048,
+                                       128,
+                                       256,
+                                       128,
+                                       4,
+                                       128,
+                                       64,
+                                       128,
+                                       2,
+                                       8,
+                                       128,
+                                       148,
+                                       deep_gemm::GemmType::MGroupedContiguous,
+                                       transform::ScalePolicy::DerivedDiv8,
+                                       /*kEnableResidualPass=*/false>);
+    (void)ptr;
 }
 
-int main() {
+int main()
+{
     // Never called; referencing them keeps the instantiations alive.
-    (void) &__instantiate_default;
-    (void) &__instantiate_small_n;
-    (void) &__instantiate_single_pass;
+    (void)&__instantiate_default;
+    (void)&__instantiate_small_n;
+    (void)&__instantiate_single_pass;
     return 0;
 }

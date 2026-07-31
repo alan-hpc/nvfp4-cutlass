@@ -16,16 +16,18 @@ namespace nvfp4_gemm::api {
 ///   d          BF16   (M, N)              output
 ///   m_indices  int32  (M,)                expert index per row
 static void m_grouped_bf16_dual_nvfp4_gemm_contiguous(
-        const torch::Tensor& a,
-        const torch::Tensor& b, const torch::Tensor& sfb,
-        const torch::Tensor& gw,
-        const torch::Tensor& d,
-        const torch::Tensor& m_indices,
-        const std::string& scale_policy,
-        const bool& enable_residual_pass) {
-    const int m = static_cast<int>(a.size(0));
-    const int k = static_cast<int>(a.size(1));
-    const int n = static_cast<int>(d.size(1));
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& sfb,
+    const torch::Tensor& gw,
+    const torch::Tensor& d,
+    const torch::Tensor& m_indices,
+    const std::string&   scale_policy,
+    const bool&          enable_residual_pass)
+{
+    const int m          = static_cast<int>(a.size(0));
+    const int k          = static_cast<int>(a.size(1));
+    const int n          = static_cast<int>(d.size(1));
     const int num_groups = static_cast<int>(gw.numel());
 
     DG_HOST_ASSERT(a.dim() == 2 and d.dim() == 2);
@@ -47,19 +49,35 @@ static void m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         return;
 
     const std::string policy = scale_policy == "residual_amax"
-                             ? "ScalePolicy::ResidualAmax"
-                             : "ScalePolicy::DerivedDiv8";
+                                   ? "ScalePolicy::ResidualAmax"
+                                   : "ScalePolicy::DerivedDiv8";
     DG_HOST_ASSERT(scale_policy == "derived_div8" or scale_policy == "residual_amax");
 
     sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
-        a, b, sfb, gw, d, m_indices, num_groups, m, n, k, policy, enable_residual_pass);
+        a,
+        b,
+        sfb,
+        gw,
+        d,
+        m_indices,
+        num_groups,
+        m,
+        n,
+        k,
+        policy,
+        enable_residual_pass);
 }
 
-static void register_apis(pybind11::module_& m) {
+static void register_apis(pybind11::module_& m)
+{
     m.def("m_grouped_bf16_dual_nvfp4_gemm_contiguous",
           &m_grouped_bf16_dual_nvfp4_gemm_contiguous,
-          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("sfb"),
-          pybind11::arg("gw"), pybind11::arg("d"), pybind11::arg("m_indices"),
+          pybind11::arg("a"),
+          pybind11::arg("b"),
+          pybind11::arg("sfb"),
+          pybind11::arg("gw"),
+          pybind11::arg("d"),
+          pybind11::arg("m_indices"),
           pybind11::arg("scale_policy") = "derived_div8",
           // Single-pass mode drops the residual MMA entirely; it exists so the
           // benchmark can isolate what the second pass costs against a kernel
@@ -67,4 +85,4 @@ static void register_apis(pybind11::module_& m) {
           pybind11::arg("enable_residual_pass") = true);
 }
 
-} // namespace nvfp4_gemm::api
+}   // namespace nvfp4_gemm::api
