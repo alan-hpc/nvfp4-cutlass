@@ -10,6 +10,9 @@ mixed-input GEMM run on the FP4 tensor cores without ever materializing a
 quantized activation in global memory.
 
 The algorithm is specified in [`docs/bf16-dual-nvfp4-algorithm.html`](docs/bf16-dual-nvfp4-algorithm.html).
+How this implementation was derived from it -- the layout derivations, the cross-checks,
+and the list of assumptions still to validate -- is written up in
+[`docs/implementation-notes.md`](docs/implementation-notes.md) (Chinese).
 
 ```
 C = A0 W^T + A1 W^T
