@@ -24,6 +24,7 @@
 #include <cutlass/arch/barrier.h>
 
 #include <nvfp4_gemm/common/tma_copy.cuh>
+#include <nvfp4_gemm/ptx/tcgen05.cuh>
 #include <nvfp4_gemm/transform/dual_nvfp4.cuh>
 
 #include "reference.hpp"
@@ -130,6 +131,58 @@ __global__ __launch_bounds__(kNumThreads, 1) void transform_test_kernel(const __
 #endif
 }
 
+/// Report how the hardware converter breaks ties on the E2M1 grid.
+///
+/// Every midpoint between two E2M1 levels is a tie, and the rule is not
+/// something to assume: the reference here rounds half-to-even, and a run on
+/// B300 disagreed at 2.5 (hardware -> 3.0, reference -> 2.0). The dual-pass
+/// structure absorbs it -- q1 moves to compensate -- but a single-pass kernel
+/// would not, and the reference should describe the hardware rather than a
+/// guess.
+__global__ void e2m1_tie_probe_kernel(uint8_t* __restrict__ out)
+{
+    const float midpoints[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.5f, 3.5f, 5.0f};
+    if (threadIdx.x == 0)
+    {
+        for (int i = 0; i < 7; ++i)
+        {
+            out[i]     = static_cast<uint8_t>(nvfp4_gemm::ptx::cvt_e2m1x2(0.0f, midpoints[i]));
+            out[7 + i] = static_cast<uint8_t>(nvfp4_gemm::ptx::cvt_e2m1x2(0.0f, -midpoints[i]));
+        }
+    }
+}
+
+static void report_tie_rule()
+{
+    uint8_t* d_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_out, 14));
+    e2m1_tie_probe_kernel<<<1, 32>>>(d_out);
+    CUDA_CHECK(cudaGetLastError());
+
+    uint8_t codes[14];
+    CUDA_CHECK(cudaMemcpy(codes, d_out, 14, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+
+    const float midpoints[7]  = {0.25f, 0.75f, 1.25f, 1.75f, 2.5f, 3.5f, 5.0f};
+    int         disagreements = 0;
+    std::printf("E2M1 tie rule (midpoint -> hardware / this reference):\n  ");
+    for (int i = 0; i < 7; ++i)
+    {
+        // The converter packs the first argument into the low nibble.
+        const float hw   = ref::decode_e2m1(codes[i] & 0xf);
+        const float host = ref::decode_e2m1(ref::quantize_e2m1_code(midpoints[i]));
+        std::printf("%.2f -> %.1f/%.1f%s  ", midpoints[i], hw, host, hw == host ? "" : " (!)");
+        if (hw != host)
+            ++disagreements;
+    }
+    std::printf("\n");
+    if (disagreements)
+        std::printf("  %d midpoint(s) differ. Harmless here -- the residual pass compensates --\n"
+                    "  but tests/python/reference/dual_nvfp4.py should adopt the hardware rule.\n",
+                    disagreements);
+    std::printf("\n");
+}
+
 int main()
 {
     // ---------------------------------------------------------------- input --
@@ -178,6 +231,8 @@ int main()
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    report_tie_rule();
+
     std::vector<uint8_t> a0(BLOCK_M * BLOCK_K / 2), a1(BLOCK_M * BLOCK_K / 2);
     std::vector<uint8_t> sfa0(BLOCK_M * kSFPerRow), sfa1(BLOCK_M * kSFPerRow);
     CUDA_CHECK(cudaMemcpy(a0.data(), d_a0, a0.size(), cudaMemcpyDeviceToHost));
@@ -186,37 +241,47 @@ int main()
     CUDA_CHECK(cudaMemcpy(sfa1.data(), d_sfa1, sfa1.size(), cudaMemcpyDeviceToHost));
 
     // ------------------------------------------------------------- compare ---
-    int    scale_mismatch = 0, code_mismatch = 0, first_bad_row = -1;
-    double max_abs_err = 0.0, sum_sq_err = 0.0, sum_sq_ref = 0.0;
+    // The question this test answers is "does the device reproduce the
+    // reference", so the primary metric compares the two *reconstructions*, not
+    // the raw codes and not the original input.
+    //
+    // Codes are allowed to differ where the difference is numerically inert, and
+    // two such cases really do occur:
+    //
+    //   * signed zero. The residual is `(x * rcp(s0) - dec(q0)) * 8`; when it
+    //     lands on zero, `rcp.approx` versus an exact divide decides whether it
+    //     arrives from below, so the device may emit -0.0 (code 8) where the
+    //     reference emits +0.0 (code 0).
+    //   * ties on the E2M1 grid. If the hardware and the reference break a
+    //     midpoint the other way, q0 moves one step and q1 moves to compensate:
+    //     -3*s0 + 4*(s0/8) and -2*s0 + -4*(s0/8) are both exactly -2.5*s0. The
+    //     dual-pass structure absorbs it.
+    //
+    // Measuring against the *input* instead would mostly measure NVFP4's own
+    // range limit: with G_A = 1 the largest representable magnitude is
+    // 448 * 6 = 2688, so the deliberately out-of-range row below saturates by
+    // design, in the reference exactly as much as on the device.
+    int    scale_mismatch = 0, real_mismatch = 0, benign_code_diff = 0, first_bad_row = -1;
+    double max_dev_ref_err = 0.0, sum_sq_dev_ref = 0.0, sum_sq_ref_recon = 0.0;
+    double sum_sq_quant_err = 0.0, sum_sq_input = 0.0, max_quant_err = 0.0;
 
     for (int m = 0; m < BLOCK_M; ++m)
     {
         for (int b = 0; b < kSFPerRow; ++b)
         {
             uint8_t q0[ref::kBlockSize], q1[ref::kBlockSize], s0, s1;
-            ref::decompose_block(&a_host[static_cast<size_t>(m) * BLOCK_K + b * ref::kBlockSize],
-                                 q0,
-                                 q1,
-                                 s0,
-                                 s1);
+            ref::decompose_block(&a_host[static_cast<size_t>(m) * BLOCK_K + b * ref::kBlockSize], q0, q1, s0, s1);
 
             const uint8_t got_s0 = sfa0[m * kSFPerRow + b];
             const uint8_t got_s1 = sfa1[m * kSFPerRow + b];
             if (got_s0 != s0 || got_s1 != s1)
             {
                 if (++scale_mismatch <= 5)
-                    std::printf("  scale mismatch m=%d block=%d: s0 %u vs %u, s1 %u vs %u\n",
-                                m,
-                                b,
-                                got_s0,
-                                s0,
-                                got_s1,
-                                s1);
+                    std::printf("  scale mismatch m=%d block=%d: s0 %u vs %u, s1 %u vs %u\n", m, b, got_s0, s0, got_s1, s1);
                 if (first_bad_row < 0)
                     first_bad_row = m;
             }
 
-            float   recon[ref::kBlockSize];
             uint8_t got_q0[ref::kBlockSize], got_q1[ref::kBlockSize];
             for (int i = 0; i < ref::kBlockSize; ++i)
             {
@@ -226,57 +291,91 @@ int main()
                 // Element 2i occupies the low nibble, 2i+1 the high nibble.
                 got_q0[i] = (col % 2) ? (byte0 >> 4) : (byte0 & 0xf);
                 got_q1[i] = (col % 2) ? (byte1 >> 4) : (byte1 & 0xf);
-                if (got_q0[i] != q0[i] || got_q1[i] != q1[i])
-                {
-                    if (++code_mismatch <= 5)
-                        std::printf("  code mismatch m=%d k=%d: q0 %u vs %u, q1 %u vs %u\n",
-                                    m,
-                                    col,
-                                    got_q0[i],
-                                    q0[i],
-                                    got_q1[i],
-                                    q1[i]);
-                    if (first_bad_row < 0)
-                        first_bad_row = m;
-                }
             }
 
-            ref::reconstruct_block(got_q0, got_q1, got_s0, got_s1, recon);
+            float dev_recon[ref::kBlockSize], ref_recon[ref::kBlockSize];
+            ref::reconstruct_block(got_q0, got_q1, got_s0, got_s1, dev_recon);
+            ref::reconstruct_block(q0, q1, s0, s1, ref_recon);
+
+            // Half of the finest quantum this block can express. A code
+            // difference that stays inside it cannot change any downstream MMA.
+            const double inert = 0.5 * ref::decode_e4m3(s1);
+
             for (int i = 0; i < ref::kBlockSize; ++i)
             {
-                const float  want = a_host[static_cast<size_t>(m) * BLOCK_K + b * ref::kBlockSize + i];
-                const double err  = static_cast<double>(recon[i]) - want;
-                max_abs_err       = std::fmax(max_abs_err, std::fabs(err));
-                sum_sq_err += err * err;
-                sum_sq_ref += static_cast<double>(want) * want;
+                const int    col  = b * ref::kBlockSize + i;
+                const double diff = static_cast<double>(dev_recon[i]) - ref_recon[i];
+
+                if (got_q0[i] != q0[i] || got_q1[i] != q1[i])
+                {
+                    if (std::fabs(diff) <= inert)
+                    {
+                        ++benign_code_diff;
+                    }
+                    else
+                    {
+                        if (++real_mismatch <= 5)
+                            std::printf("  code mismatch m=%d k=%d: q0 %u vs %u, q1 %u vs %u  (recon %.6g vs %.6g)\n",
+                                        m,
+                                        col,
+                                        got_q0[i],
+                                        q0[i],
+                                        got_q1[i],
+                                        q1[i],
+                                        dev_recon[i],
+                                        ref_recon[i]);
+                        if (first_bad_row < 0)
+                            first_bad_row = m;
+                    }
+                }
+
+                max_dev_ref_err = std::fmax(max_dev_ref_err, std::fabs(diff));
+                sum_sq_dev_ref += diff * diff;
+                sum_sq_ref_recon += static_cast<double>(ref_recon[i]) * ref_recon[i];
+
+                const double want      = a_host[static_cast<size_t>(m) * BLOCK_K + col];
+                const double quant_err = static_cast<double>(dev_recon[i]) - want;
+                sum_sq_quant_err += quant_err * quant_err;
+                sum_sq_input += want * want;
+                max_quant_err = std::fmax(max_quant_err, std::fabs(quant_err));
             }
         }
     }
 
-    const double rel_l2 = std::sqrt(sum_sq_err / (sum_sq_ref + 1e-30));
-    std::printf("\nscale mismatches: %d / %d\n", scale_mismatch, BLOCK_M * kSFPerRow);
-    std::printf("code  mismatches: %d / %d\n", code_mismatch, BLOCK_M * BLOCK_K);
-    std::printf("reconstruction:   rel L2 %.6f, max abs err %.6g\n", rel_l2, max_abs_err);
+    const double rel_dev_ref = std::sqrt(sum_sq_dev_ref / (sum_sq_ref_recon + 1e-30));
+    const double rel_quant   = std::sqrt(sum_sq_quant_err / (sum_sq_input + 1e-30));
+
+    std::printf("\nscale mismatches:        %d / %d\n", scale_mismatch, BLOCK_M * kSFPerRow);
+    std::printf("code mismatches (real):  %d / %d\n", real_mismatch, BLOCK_M * BLOCK_K);
+    std::printf("code diffs (inert):      %d   (signed zero / grid ties, same value)\n", benign_code_diff);
+    std::printf("device vs reference:     rel L2 %.3e, max abs %.3e\n", rel_dev_ref, max_dev_ref_err);
+    std::printf("device vs input:         rel L2 %.6f, max abs %.6g\n", rel_quant, max_quant_err);
+    std::printf("  (the second line is NVFP4's own error, and includes the row of\n"
+                "   +-1e4 that saturates on purpose: with G_A = 1 nothing above\n"
+                "   448 * 6 = 2688 is representable.)\n");
 
     bool ok = true;
-    if (scale_mismatch || code_mismatch)
+    if (scale_mismatch)
     {
-        std::printf("\nFAIL: device output differs from the reference (first bad row %d)\n",
-                    first_bad_row);
-        std::printf("      A widespread mismatch usually means the A-tile swizzle "
-                    "replication in\n      swizzled_byte_offset() disagrees with what "
-                    "TMA actually wrote.\n");
-        std::printf("      Mismatches only in adjacent element pairs instead point at the\n"
-                    "      cvt.rn.satfinite.e2m1x2.f32 operand order.\n");
+        std::printf("\nFAIL: block scales differ from the reference (first bad row %d)\n", first_bad_row);
+        std::printf("      Scales come from the amax of the 64 values a thread read, so this\n"
+                    "      almost always means swizzled_byte_offset() disagrees with what TMA\n"
+                    "      actually wrote into shared memory.\n");
         ok = false;
     }
-    // Dual NVFP4 on Gaussian data lands near 1.2e-2 relative L2; 3e-2 is a loose
-    // bound that still catches a dead residual pass (which sits near 9.5e-2).
-    if (rel_l2 > 3e-2)
+    if (real_mismatch)
     {
-        std::printf("\nFAIL: reconstruction error %.6f is too high; is the residual pass "
-                    "contributing?\n",
-                    rel_l2);
+        std::printf("\nFAIL: %d codes differ by more than the block's finest quantum\n", real_mismatch);
+        std::printf("      Differences confined to adjacent element pairs point at the E2M1\n"
+                    "      nibble packing order instead.\n");
+        ok = false;
+    }
+    // rcp.approx costs about 2^-23 relative, and a code that flips at a rounding
+    // boundary is absorbed by the residual pass, so anything above this is a
+    // genuine disagreement rather than arithmetic noise.
+    if (rel_dev_ref > 1e-5)
+    {
+        std::printf("\nFAIL: device reconstruction differs from the reference by %.3e\n", rel_dev_ref);
         ok = false;
     }
 

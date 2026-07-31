@@ -273,10 +273,22 @@ single NVFP4 activation pass.
 
 ## Status
 
-The CPU-side tests -- numerics reference and physical layouts -- are passing.
-**The CUDA kernel has not been compiled or run**: the machine it was written on
-has no CUTLASS checkout, no `nvcc` and no Blackwell GPU, so `scripts/build.sh`
-has never been executed. Expect to fix compile errors on the first run.
+The kernel **compiles and the transform stage runs on a B300** (CUDA 13.3,
+compute capability 10.3). CPU-side tests -- numerics reference and physical
+layouts -- pass.
+
+Settled on hardware so far:
+
+| # | Assumption | Result |
+| --- | --- | --- |
+| 1 | `cutlass::float_ue4m3_t` is the right SF type | confirmed (compiles) |
+| 4 | `cvt` operand order | **removed** -- the CUDA intrinsics define the packing |
+| 5 | swizzle replication in `swizzled_byte_offset` | **confirmed** -- 0/1024 scale mismatches |
+
+Item 5 is the strong one: a block scale is the amax of the 64 values a thread
+read, so every scale matching means every thread read the right data.
+
+Still open, both needing a run of `tests/python/test_gemm.py`:
 
 Before trusting the kernel, validate these on hardware. Each is a point where the
 implementation encodes an assumption that could not be checked offline:
