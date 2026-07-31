@@ -51,6 +51,47 @@ nvfp4_gemm.m_grouped_bf16_dual_nvfp4_gemm_contiguous(a, b, sfb, gw, d, m_indices
 Kernels are JIT-compiled on first use through DeepGEMM's compiler and cached in
 `~/.deep_gemm`, so there is no CUDA build at install time.
 
+## Benchmarks
+
+```bash
+python benchmarks/bench_moe_forward.py              # all shapes, all backends
+python benchmarks/bench_moe_forward.py --breakdown  # plus per-stage timing
+```
+
+The comparison is over the **complete online chain**, not a bare GEMM. A real
+forward hands the expert GEMM a BF16 activation, so every quantized baseline must
+convert it first and that conversion sits inside the timed region:
+
+| backend | online chain |
+| --- | --- |
+| `dual_nvfp4` | BF16 → fused decompose + 2× block-scaled MMA → BF16 (one kernel) |
+| `single_nvfp4` | same kernel, residual pass disabled |
+| `mxfp8_mxfp4` | BF16 → `mxfp8_quantize` → MXFP8 × MXFP4 grouped GEMM |
+| `fi_nvfp4_moe` | BF16 → `fp4_quantize` → FlashInfer fused MoE (**different scope**) |
+
+Timing is CUDA Graph replay. The doc records API event times going bimodal
+between ~0.060 and ~0.123 ms on one kernel, the difference being host dispatch
+gap; a multi-kernel baseline pays that gap more often than a single-kernel one,
+so eager timing would systematically flatter the fused path.
+
+Three things about this comparison are worth stating plainly:
+
+- **`single_nvfp4` is the controlled A/B.** Same kernel, same tiles, same
+  pipeline, same epilogue, one MMA instead of two. It isolates what the second
+  pass costs and what it buys, with no cross-library confound. Cross-vendor
+  numbers always mix in scheduler, tile and epilogue differences.
+- **DeepGEMM cannot be the NVFP4 baseline.** Its FP4 kernel asserts
+  `gran_k ∈ {32, 128}` -- MXFP4 (block 32, UE8M0) and MXFP8, not NVFP4's block 16
+  with E4M3 scales. That gap is exactly why this repo has its own NVFP4 UMMA.
+- **`fi_nvfp4_moe` measures different work.** `cutlass_fused_moe` is a full MoE
+  (routing, two GEMMs, SwiGLU, weighted reduce); the rest are one expert GEMM.
+  The harness refuses to print a speedup for it rather than mislead.
+
+Accuracy is reported next to speed for every backend, against the same FP32
+ground truth. A cheaper activation format that loses precision is not a free win,
+and the doc's own sweep found MXFP8 ahead by 1.61-2.48x on this workload -- read
+both columns.
+
 ## Bring-up on new hardware
 
 Before trusting an end-to-end number, run the transform in isolation. It has no

@@ -21,7 +21,8 @@ static void __instantiate_default() {
         /*kNumEpilogueThreads=*/128,
         /*kNumSMs=*/148,
         deep_gemm::GemmType::MGroupedContiguous,
-        transform::ScalePolicy::DerivedDiv8>);
+        transform::ScalePolicy::DerivedDiv8,
+        /*kEnableResidualPass=*/true>);
     (void) ptr;
 }
 
@@ -38,7 +39,25 @@ static void __instantiate_small_n() {
         128,
         148,
         deep_gemm::GemmType::MGroupedContiguous,
-        transform::ScalePolicy::ResidualAmax>);
+        transform::ScalePolicy::ResidualAmax,
+        /*kEnableResidualPass=*/true>);
+    (void) ptr;
+}
+
+// Single-pass mode, so both branches of `kEnableResidualPass` get compiled.
+static void __instantiate_single_pass() {
+    auto ptr = reinterpret_cast<void*>(&sm100_bf16_dual_nvfp4_gemm_impl<
+        1024, 2048,
+        128, 256, 128,
+        4,
+        128, 64, 128,
+        2,
+        8,
+        128,
+        148,
+        deep_gemm::GemmType::MGroupedContiguous,
+        transform::ScalePolicy::DerivedDiv8,
+        /*kEnableResidualPass=*/false>);
     (void) ptr;
 }
 
@@ -46,5 +65,6 @@ int main() {
     // Never called; referencing them keeps the instantiations alive.
     (void) &__instantiate_default;
     (void) &__instantiate_small_n;
+    (void) &__instantiate_single_pass;
     return 0;
 }

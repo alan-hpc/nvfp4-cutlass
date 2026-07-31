@@ -93,6 +93,7 @@ public:
         int compiled_n, compiled_k;
         GemmType gemm_type;
         std::string scale_policy;
+        bool enable_residual_pass;
         DualNVFP4Config config;
         deep_gemm::LaunchArgs launch_args;
 
@@ -121,6 +122,7 @@ static void __instantiate_kernel() {{
         {},
         {},
         {},
+        {},
         {}
     >);
 }};
@@ -134,7 +136,8 @@ static void __instantiate_kernel() {{
         args.config.num_epilogue_threads,
         args.launch_args.grid_dim.first,
         to_string(args.gemm_type),
-        args.scale_policy);
+        args.scale_policy,
+        args.enable_residual_pass ? "true" : "false");
     }
 
     static void launch_impl(const deep_gemm::KernelHandle& kernel,
@@ -164,7 +167,8 @@ static void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         const torch::Tensor& d,
         const torch::Tensor& grouped_layout,
         const int& num_groups, const int& m, const int& n, const int& k,
-        const std::string& scale_policy = "ScalePolicy::DerivedDiv8") {
+        const std::string& scale_policy = "ScalePolicy::DerivedDiv8",
+        const bool& enable_residual_pass = true) {
     DG_HOST_ASSERT(a.scalar_type() == torch::kBFloat16);
     DG_HOST_ASSERT(d.scalar_type() == torch::kBFloat16);
     DG_HOST_ASSERT(b.scalar_type() == deep_gemm::kPackedFP4);
@@ -208,6 +212,7 @@ static void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         .compiled_n = n, .compiled_k = k,
         .gemm_type = GemmType::MGroupedContiguous,
         .scale_policy = scale_policy,
+        .enable_residual_pass = enable_residual_pass,
         .config = config,
         .launch_args = deep_gemm::LaunchArgs(num_sms, config.num_threads(), config.smem_size()),
         .grouped_layout = grouped_layout.data_ptr(),
@@ -218,7 +223,9 @@ static void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         .tensor_map_cd = tensor_map_cd
     };
     const auto code = SM100BF16DualNVFP4GemmRuntime::generate(args);
-    const auto runtime = deep_gemm::compiler->build("sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous", code);
+    const auto runtime = deep_gemm::compiler->build(
+        enable_residual_pass ? "sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous"
+                             : "sm100_m_grouped_bf16_single_nvfp4_gemm_contiguous", code);
     SM100BF16DualNVFP4GemmRuntime::launch(runtime, args);
 }
 

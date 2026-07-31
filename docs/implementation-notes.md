@@ -428,7 +428,84 @@ standalone 路径故意不依赖 PyTorch 和 JIT：新硬件上第一次 bring-u
 
 ---
 
-## 11. 后续方向
+## 11. 性能对比的方法论
+
+`benchmarks/bench_moe_forward.py`。这一节记录**为什么这么测**，因为测错了比不测更糟——
+一个看起来漂亮但口径不对的数字会把优化引向错误方向。
+
+### 11.1 必须测完整在线链路
+
+文档已经指出过这一点（"为避免只比较裸 GEMM，新增 `bench_bf16_mxfp8_mxfp4.py`，
+测量完整在线链路"），但值得说清楚原因：
+
+真实 forward 交给 expert GEMM 的是 **BF16 激活**。任何量化基线都必须先把它转换掉，
+这笔开销在生产里跑不掉。fused kernel 的全部卖点就是这笔开销被吸收进 mainloop 了。
+**只比裸 GEMM 等于把对手的成本藏起来。**
+
+所以激活量化在计时区间**内**，权重量化在计时区间**外**（离线一次，与推理一致）。
+
+| backend | 在线链路 |
+| --- | --- |
+| `dual_nvfp4` | BF16 → 融合分解 + 两遍 block-scaled MMA → BF16（单 kernel） |
+| `single_nvfp4` | 同一 kernel，关掉残差遍 |
+| `mxfp8_mxfp4` | BF16 → `mxfp8_quantize` → MXFP8×MXFP4 grouped GEMM |
+| `fi_nvfp4_moe` | BF16 → `fp4_quantize` → FlashInfer fused MoE（**口径不同**） |
+
+### 11.2 必须用 CUDA Graph
+
+文档记录了一个关键现象：同一个 kernel 的 API event 时间在 **0.060–0.123 ms 之间双峰**，
+差值主要是 host dispatch gap。
+
+这对本次对比是**系统性偏差**而非噪声：多 kernel 的基线（quant + GEMM = 2 次 launch）
+比单 kernel 的 fused 路径多付一次 gap。用 eager 计时会**系统性地美化我们自己**。
+Graph capture 把两边的 gap 都去掉。
+
+capture 失败时代码会退回 eager 并**打印说明**，而不是静默混用两种口径。
+
+### 11.3 `single_nvfp4` 才是受控的 A/B
+
+为此给 kernel 加了 `kEnableResidualPass` 模板参数：关掉时不发第二条 MMA、不做 SFA1 的
+UTCCP、transform 不算 q1。同 tile、同流水、同 epilogue，只差一遍 MMA。
+
+它直接回答"第二遍花了多少、换来多少精度"，没有任何跨库混淆项。跨厂商对比里
+scheduler、tile 选择、epilogue 实现的差异永远混在一起，分不出是算法赢了还是工程赢了。
+
+从第 8.1 节的参考实现可以预期精度侧的分野：对文档定义的 ground truth，
+单遍约 **0.9954**、双遍约 **0.9999**。性能侧要等 B300 实测。
+
+### 11.4 DeepGEMM 不能当 NVFP4 基线
+
+这一点最初我判断错了，写 benchmark 时才发现：DeepGEMM 的 FP4 kernel 断言
+`kGranKA == 32 or 128`，即只有 **MXFP4（block32 + UE8M0）和 MXFP8**，
+**没有 NVFP4（block16 + E4M3）**。
+
+所以：
+- MXFP8×MXFP4 基线可以用 DeepGEMM 的 grouped GEMM ✓
+- NVFP4 基线不能 ✗ —— 这恰恰就是本仓库要自己写 NVFP4 UMMA 的原因（第 2 节）
+
+### 11.5 FlashInfer NVFP4 的口径问题
+
+vLLM 实际调用的 NVFP4 MoE 入口是 `flashinfer.fused_moe.cutlass_fused_moe`
+（见 `vllm/utils/flashinfer.py`），它是一个**完整 MoE**：routing + 两个 GEMM +
+SwiGLU + 加权 reduce。而本 harness 的其他 backend 都是**一个 expert GEMM**。
+
+拿完整 MoE 的墙钟时间去比单个 grouped GEMM，做的工作量根本不同。
+所以 `fi_nvfp4_moe` 被标记 `comparable = False`，harness **拒绝为它打印加速比**，
+并在 `setup` 里直接说明该怎么做才对（另建一个两边都跑完整 MoE 的 harness）。
+宁可少一个数，也不要一个会误导人的数。
+
+### 11.6 精度与速度必须一起读
+
+每个 backend 都对同一个 FP32 ground truth（`A_bf16 @ W_bf16ᵀ`）报 cosine。
+注意这里用的是**全精度权重**做基准，而不是第 8 节那个 dequant 权重的基准——
+因为不同 backend 的权重量化格式不同（NVFP4 vs MXFP4），只有全精度是共同基准。
+
+文档自己的 sweep 里 MXFP8 完整链路快 **1.61–2.48×**。所以"更快"不是本项目的既定结论，
+拿激活表达能力换来的代价是真实的。benchmark 的作用是把这个 trade-off 量化，不是证明某一方赢。
+
+---
+
+## 12. 后续方向
 
 按预期收益排序：
 

@@ -61,7 +61,8 @@ template <uint32_t SHAPE_N, uint32_t SHAPE_K,
           uint32_t kNumEpilogueThreads,
           uint32_t kNumSMs,
           GemmType kGemmType,
-          ScalePolicy kScalePolicy>
+          ScalePolicy kScalePolicy,
+          bool kEnableResidualPass>
 CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilogueThreads, 1)
 sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                                 const float* __restrict__ weight_global_scales,
@@ -345,7 +346,8 @@ sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                             const uint32_t byte_off = (a * kNumSFASubAtoms + i) * kNumUTCCPAlignedElems * 4;
                             const uint32_t col = (a * kNumSFASubAtoms + i) * 4;
                             utccp_sf(smem_sfa0[stage_idx] + byte_off, kTmemStartColOfSFA0 + col);
-                            utccp_sf(smem_sfa1[stage_idx] + byte_off, kTmemStartColOfSFA1 + col);
+                            if constexpr (kEnableResidualPass)
+                                utccp_sf(smem_sfa1[stage_idx] + byte_off, kTmemStartColOfSFA1 + col);
                         }
                         #pragma unroll
                         for (uint32_t i = 0; i < kNumSFBSubAtoms; ++ i) {
@@ -380,8 +382,12 @@ sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                         // first K block starts a fresh accumulator.
                         issue_pass(a, a0_base_lo, kTmemStartColOfSFA0,
                                    a > 0 or k_block_idx > 0);
-                        // A1 x W always accumulates on top.
-                        issue_pass(a, a1_base_lo, kTmemStartColOfSFA1, true);
+                        // A1 x W always accumulates on top.  Single-pass mode
+                        // drops the instruction rather than multiplying by a
+                        // zeroed A1, so the benchmark measures the real cost of
+                        // the second pass and not just its numerical effect.
+                        if constexpr (kEnableResidualPass)
+                            issue_pass(a, a1_base_lo, kTmemStartColOfSFA1, true);
                     }
                 }
                 __syncwarp();
@@ -432,7 +438,7 @@ sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
 
                 transform::transform_a_tile<
                     BLOCK_M, BLOCK_K, kSwizzleAMode, kSwizzleABMode,
-                    kNumTransformThreads, kScalePolicy>(
+                    kNumTransformThreads, kScalePolicy, kEnableResidualPass>(
                     smem_a[stage_idx], smem_a0[stage_idx], smem_a1[stage_idx],
                     smem_sfa0[stage_idx], smem_sfa1[stage_idx], transform_tid);
 

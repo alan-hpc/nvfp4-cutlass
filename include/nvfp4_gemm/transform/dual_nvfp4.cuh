@@ -84,7 +84,10 @@ struct BlockCodes {
 /// receive 8 packed bytes each.  Everything after the amax stays in the
 /// *normalized* domain: the residual is `(x * rcp(s0) - dec(q0)) * 8`, never
 /// `(x - dec(q0) * s0) / s1`, which saves a dequant multiply per element.
-template <ScalePolicy kScalePolicy>
+/// `kEnableResidualPass = false` degenerates this to plain single-pass NVFP4.
+/// That mode exists so the benchmark can measure the residual pass against an
+/// otherwise byte-identical kernel: same pipeline, same tiles, same epilogue.
+template <ScalePolicy kScalePolicy, bool kEnableResidualPass = true>
 CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
                                     uint8_t (&q0_bytes)[kBlockSize / 2],
                                     uint8_t (&q1_bytes)[kBlockSize / 2],
@@ -121,10 +124,23 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
         const uint32_t packed = ptx::cvt_e2m1x2(u[2 * i + 1], u[2 * i]);
         q0_bytes[i] = static_cast<uint8_t>(packed);
 
-        const uint32_t halves = ptx::cvt_e2m1x2_to_f16x2(packed);
-        const float2 decoded = __half22float2(*reinterpret_cast<const __half2*>(&halves));
-        q0_dec[2 * i] = decoded.x;
-        q0_dec[2 * i + 1] = decoded.y;
+        if constexpr (kEnableResidualPass) {
+            const uint32_t halves = ptx::cvt_e2m1x2_to_f16x2(packed);
+            const float2 decoded = __half22float2(*reinterpret_cast<const __half2*>(&halves));
+            q0_dec[2 * i] = decoded.x;
+            q0_dec[2 * i + 1] = decoded.y;
+        }
+    }
+
+    if constexpr (not kEnableResidualPass) {
+        // Single-pass mode: emit a zero residual so the second MMA, if it is
+        // still issued, contributes nothing. The scale must stay a valid finite
+        // E4M3 rather than zero.
+        s1_code = ptx::cvt_e4m3(s0f * 0.125f);
+        #pragma unroll
+        for (uint32_t i = 0; i < kBlockSize / 2; ++ i)
+            q1_bytes[i] = 0;
+        return;
     }
 
     // 5/6: residual pass.
@@ -172,7 +188,8 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
 template <uint32_t BLOCK_M, uint32_t BLOCK_K,
           uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode,
           uint32_t kNumTransformThreads,
-          ScalePolicy kScalePolicy>
+          ScalePolicy kScalePolicy,
+          bool kEnableResidualPass = true>
 CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
                                      uint8_t* smem_a0, uint8_t* smem_a1,
                                      uint8_t* smem_sfa0, uint8_t* smem_sfa1,
@@ -229,7 +246,8 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
 
             uint8_t q0_bytes[kBlockSize / 2], q1_bytes[kBlockSize / 2];
             uint32_t s0_code, s1_code;
-            decompose_block<kScalePolicy>(block, q0_bytes, q1_bytes, s0_code, s1_code);
+            decompose_block<kScalePolicy, kEnableResidualPass>(
+                block, q0_bytes, q1_bytes, s0_code, s1_code);
 
             #pragma unroll
             for (uint32_t i = 0; i < kBlockSize / 2; ++ i) {
