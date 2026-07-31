@@ -38,7 +38,7 @@ __global__ __launch_bounds__(256, 1) void swizzle_roundtrip_kernel(const __grid_
     using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
     extern __shared__ __align__(1024) uint8_t smem[];
-    auto barrier = reinterpret_cast<Barrier*>(smem + kRows * kRowBytes);
+    auto                                      barrier = reinterpret_cast<Barrier*>(smem + kRows * kRowBytes);
 
     if (threadIdx.x == 0)
     {
@@ -83,9 +83,12 @@ static bool check_case(const char* label)
 
     // A swizzled box is exactly one atom wide; TMA issues one copy per atom.
     const auto tma = tma_test::make_2d(CU_TENSOR_MAP_DATA_TYPE_UINT8, d_in,
-                                       /*gmem_inner=*/kRowBytes, /*gmem_outer=*/kRows,
-                                       /*box_inner=*/kSwizzleMode, /*box_outer=*/kRows,
-                                       /*outer_stride=*/kRowBytes, kSwizzleMode);
+                                       /*gmem_inner=*/kRowBytes,
+                                       /*gmem_outer=*/kRows,
+                                       /*box_inner=*/kSwizzleMode,
+                                       /*box_outer=*/kRows,
+                                       /*outer_stride=*/kRowBytes,
+                                       kSwizzleMode);
 
     const int smem_size = kRows * kRowBytes + 1024;
     CUDA_CHECK(cudaFuncSetAttribute(swizzle_roundtrip_kernel<kRowBytes, kSwizzleMode>,
@@ -113,7 +116,10 @@ static bool check_case(const char* label)
     std::printf("  %-34s %s", label, ok ? "ok\n" : "");
     if (not ok)
         std::printf("FAIL  %d / %d bytes wrong, first at row %d byte %d\n",
-                    mismatches, kRows * kRowBytes, first_m, first_k);
+                    mismatches,
+                    kRows * kRowBytes,
+                    first_m,
+                    first_k);
     return ok;
 }
 

@@ -52,11 +52,6 @@ CUTLASS_DEVICE void replace_smem_desc_addr(cute::UMMA::SmemDescriptor& desc, con
     desc.start_address_ = static_cast<uint16_t>(uint_ptr >> 4);
 }
 
-CUTLASS_DEVICE static uint32_t get_atom_base(const cute::UMMA::LayoutType& layout_type)
-{
-    return layout_type == cute::UMMA::LayoutType::SWIZZLE_128B_BASE32B ? 32 : 16;
-}
-
 template<uint32_t kSwizzleMode>
 constexpr static cute::UMMA::LayoutType to_umma_layout_type()
 {
@@ -76,18 +71,31 @@ constexpr static cute::UMMA::LayoutType to_umma_layout_type()
 /// Descriptor for a K-major packed-FP4 operand.
 ///
 /// Two E2M1 elements share a byte, so a row of `BLOCK_K` elements occupies
-/// `BLOCK_K / 2` bytes and the swizzle mode must cover exactly that -- one
-/// atom on the K axis, hence LBO = 0.
+/// `BLOCK_K / 2` bytes and the swizzle mode must cover exactly that -- one atom
+/// on the K axis, hence LBO = 0.
+///
+/// The stride is taken from CuTe's own atom rather than recomputed: an
+/// `UMMA::Layout_K_SW*_Atom` is 8 rows tall by definition, so consecutive atoms
+/// along MN are 8 rows apart. Deriving it keeps the descriptor, the TMA
+/// descriptor and `transform::swizzled_byte_offset` all agreeing on one layout.
 template<uint32_t BLOCK_MN, uint32_t BLOCK_K, uint32_t kSwizzleMode>
 CUTLASS_DEVICE cute::UMMA::SmemDescriptor make_packed_fp4_desc(void* base_smem_ptr)
 {
     NVFP4_STATIC_ASSERT(kSwizzleMode * 2 == BLOCK_K, "Packed-FP4 swizzle must cover one K block");
 
-    constexpr auto layout_type        = to_umma_layout_type<kSwizzleMode>();
-    const uint32_t num_non_contiguous = 128 / get_atom_base(layout_type);
-    // Byte stride between consecutive 8-row atoms on MN.
-    const uint32_t stride_byte_offset = num_non_contiguous * BLOCK_K / 2;
-    return make_smem_desc(layout_type, base_smem_ptr, stride_byte_offset, 0);
+    using atom_t                 = cute::conditional_t<kSwizzleMode == 128,
+                                                       cute::UMMA::Layout_K_SW128_Atom<uint8_t>,
+                                                       cute::conditional_t<kSwizzleMode == 64,
+                                                                           cute::UMMA::Layout_K_SW64_Atom<uint8_t>,
+                                                                           cute::UMMA::Layout_K_SW32_Atom<uint8_t>>>;
+    constexpr uint32_t kAtomRows = cute::size<0>(atom_t{});
+    NVFP4_STATIC_ASSERT(kAtomRows == 8, "UMMA swizzle atoms are 8 rows tall");
+    NVFP4_STATIC_ASSERT(static_cast<uint32_t>(cute::size<1>(atom_t{})) == kSwizzleMode,
+                        "Atom row width must equal the swizzle mode in bytes");
+
+    // Bytes between consecutive 8-row atoms along MN.
+    constexpr uint32_t kStrideByteOffset = kAtomRows * (BLOCK_K / 2);
+    return make_smem_desc(to_umma_layout_type<kSwizzleMode>(), base_smem_ptr, kStrideByteOffset, 0);
 }
 
 /// Advance a packed-FP4 descriptor by `k_elems` along K.

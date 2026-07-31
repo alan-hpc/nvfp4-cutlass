@@ -570,7 +570,44 @@ device 的 `rcp.approx` 让 |u| 微微越过 5.0，参考的精确除法没有�
 所以判据第三次改对：不问"是否一致"，问"**device 的量化是否不差于参考**"。code 差异分三类：
 inert（同值，符号零）、boundary（异值等误差，边界另一侧）、worse（真的更差，才算失败）。
 
-### 12.4 三次判据都错，共同的毛病
+### 12.4 端到端 cosine ≈ 0 —— 手推了库已经定义好的东西
+
+`test_gemm.py` 全部形状 cosine ≈ 0、rel L2 ≈ 1.438 ≈ √2。**量级对、相关性为零**，
+是操作数被打乱而不是算术出错。
+
+根因在 `swizzled_byte_offset`：我写的是 `bank_group ^ (row % chunks)`。推导一遍
+CuTe 的定义——SW128/SW64/SW32 就是 `Swizzle<3,4,3>`/`<2,4,3>`/`<1,4,3>`，
+即从 offset 第 7 位起取 B 位、XOR 进第 4 位起的 16B chunk 索引；swizzle atom 恒 8 行高，
+所以 `offset = row*mode + chunk*16 + byte` 展开后：
+
+| 模式 | chunk 位 | row 位 | XOR 源 |
+| --- | --- | --- | --- |
+| 128B | [4,7) | [7,10) | `row % 8` |
+| 64B | [4,6) | [6,9) | `(row>>1) % 4` |
+| 32B | [4,5) | [5,8) | `(row>>2) % 2` |
+
+**只有 128B 能化简成 `row % chunks`。** A 用 128B 读（所以 transform 测试通过），
+A0/A1 用 64B 写（所以 GEMM 全错）。
+
+但真正的教训不是"位域推错了"，而是**这段代码根本不该由我来推**。CUTLASS 已经把
+swizzle 定义为 `cute::Swizzle<B,M,S>`，它同时也是 `UMMA::Layout_K_SW*_Atom` 和 TMA
+descriptor 的构造基础。直接调用它，就**按构造正确**，而且 CUTLASS 改了我们跟着改。
+现在的实现是：
+
+```cpp
+using swizzle_t = /* 128 -> Swizzle<3,4,3>, 64 -> <2,4,3>, 32 -> <1,4,3> */;
+return atom_idx * (BLOCK_MN * kSwizzleMode) + swizzle_t{}(m * kSwizzleMode + byte_in_atom);
+```
+
+同样的原则套用到 UMMA descriptor：SBO 不再照公式手算，而是从
+`cute::UMMA::Layout_K_SW*_Atom` 的行数推出来，并 static_assert atom 是 8 行、
+行宽等于 swizzle 模式。
+
+**通用规则：凡是库已经定义的布局/描述符/编码，一律调用库；手写只用于库确实没有的东西
+（比如本仓库的 NVFP4 MMA 指令）。** 手推的东西错了不会报错，只会在几层之后变成一个
+看不出来源的数值问题。
+
+### 12.5 三次判据都错，共同的毛病
 
 三次都是**拿错了参照物**：先拿原始输入（测的是 NVFP4 量程）、再拿参考的逐位输出
 （测的是 rcp.approx 的确定性）、最后才是"量化质量不劣于参考"。写数值 kernel 的测试时，

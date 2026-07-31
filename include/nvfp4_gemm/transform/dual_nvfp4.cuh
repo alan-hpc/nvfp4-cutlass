@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+
 #include <cuda_bf16.h>
+#include <cute/swizzle.hpp>
 
 #include <nvfp4_gemm/common/macros.cuh>
 #include <nvfp4_gemm/common/math.cuh>
@@ -36,41 +38,34 @@ enum class ScalePolicy
 
 /// Byte offset of element (m, k) inside a K-major, `kSwizzleMode`-swizzled tile.
 ///
-/// TMA splits a row into `BLOCK_K * sizeof(T) / kSwizzleMode` independent
-/// swizzle atoms, each stored as its own [BLOCK_MN, atom] sub-tile. The transform
-/// warps read A and write A0/A1 with plain LDS/STS, so they have to reproduce
-/// this mapping exactly -- there is no TMA to do it for them, and a mismatch is
-/// silent.
+/// The transform warps read A and write A0/A1 with plain LDS/STS, so they have to
+/// land on the same addresses TMA and UMMA use. Rather than re-derive the bit
+/// pattern, apply CuTe's own swizzle functor -- `Swizzle<3,4,3>`, `<2,4,3>` and
+/// `<1,4,3>` are the definitions of SW128/SW64/SW32, and are the same objects
+/// `UMMA::Layout_K_SW*_Atom` and the TMA descriptors are built from. Whatever
+/// CUTLASS means by a swizzle mode, this means too.
 ///
-/// The XOR source is *not* simply the row index. CuTe spells the three modes
-/// SW128/SW64/SW32 as `Swizzle<3,4,3>`/`<2,4,3>`/`<1,4,3>`: B bits taken from bit
-/// 7 of the offset upward, XORed into the 16-byte chunk index at bit 4. A swizzle
-/// atom is always 8 rows tall, so with `offset = row * kSwizzleMode + chunk * 16 + byte`
-/// the chunk index sits at bits [4, 4+log2(chunks)) and the rows above it:
+/// (Hand-deriving it is how this went wrong once: the XOR source was written as
+/// `row % chunks`, which happens to be right for 128 B and wrong for 64 B, and
+/// the GEMM came back with the right magnitude and no correlation.)
 ///
-///   128 B: chunk = bits[4,7), row = bits[7,10)  ->  XOR with  row       % 8
-///    64 B: chunk = bits[4,6), row = bits[6, 9)  ->  XOR with (row >> 1) % 4
-///    32 B: chunk = bits[4,5), row = bits[5, 8)  ->  XOR with (row >> 2) % 2
-///
-/// Only the 128 B case reduces to `row % chunks`; assuming that form for the
-/// others scrambles the tile.
+/// Everything is byte-granular, because the swizzle is: one helper then serves
+/// the BF16 A tile and the packed-FP4 A0/A1 tiles alike.
 template<uint32_t BLOCK_MN, uint32_t kSwizzleMode>
 CUTLASS_DEVICE uint32_t swizzled_byte_offset(const uint32_t& m, const uint32_t& k_byte)
 {
     NVFP4_STATIC_ASSERT(kSwizzleMode == 32 or kSwizzleMode == 64 or kSwizzleMode == 128, "Unsupported swizzle mode");
-    constexpr uint32_t kNumBankGroups = kSwizzleMode / 16;
-    constexpr uint32_t kAtomRowBytes  = kSwizzleMode;
-    constexpr uint32_t kRowShift      = kSwizzleMode == 128 ? 0 : (kSwizzleMode == 64 ? 1 : 2);
+    using swizzle_t = cute::conditional_t<kSwizzleMode == 128,
+                                          cute::Swizzle<3, 4, 3>,
+                                          cute::conditional_t<kSwizzleMode == 64, cute::Swizzle<2, 4, 3>, cute::Swizzle<1, 4, 3>>>;
 
-    const uint32_t atom_idx      = k_byte / kAtomRowBytes;
-    const uint32_t byte_in_atom  = k_byte % kAtomRowBytes;
-    const uint32_t bank_group    = byte_in_atom / 16;
-    const uint32_t byte_in_group = byte_in_atom % 16;
+    // TMA splits a row into `row_bytes / kSwizzleMode` atoms, each stored as its
+    // own [BLOCK_MN, kSwizzleMode] sub-tile; the swizzle acts within one atom.
+    const uint32_t atom_idx     = k_byte / kSwizzleMode;
+    const uint32_t byte_in_atom = k_byte % kSwizzleMode;
+    const uint32_t linear       = m * kSwizzleMode + byte_in_atom;
 
-    const uint32_t swizzled_group = bank_group ^ ((m >> kRowShift) & (kNumBankGroups - 1));
-    return atom_idx * (BLOCK_MN * kAtomRowBytes) +   // atom sub-tile
-           m * kAtomRowBytes +                       // row inside the atom
-           swizzled_group * 16 + byte_in_group;      // swizzled position
+    return atom_idx * (BLOCK_MN * kSwizzleMode) + static_cast<uint32_t>(swizzle_t{}(linear));
 }
 
 /// uint32 index of row `m` inside a 128x4 scale-factor atom, in the layout UTCCP
