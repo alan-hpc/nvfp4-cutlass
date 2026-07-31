@@ -6,7 +6,7 @@
 // `deep_gemm/common/{compile,exception}.cuh`, reduced to what this kernel uses
 // and renamed into the `NVFP4_` prefix so the two can coexist in one build.
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 #include <cutlass/detail/helper_macros.hpp>
 
 #if defined(__NVCC__) or (defined(__clang__) and defined(__CUDA__)) or defined(__CUDACC_RTC__) or defined(__CLION_IDE__)

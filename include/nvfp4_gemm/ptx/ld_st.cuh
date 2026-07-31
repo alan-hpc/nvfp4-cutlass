@@ -10,7 +10,7 @@
 // with an explicit generic-to-shared cast keeps the compiler from re-deriving
 // addresses it cannot see through.
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 
 #include <nvfp4_gemm/common/macros.cuh>
 

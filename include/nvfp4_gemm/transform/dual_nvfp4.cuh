@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 #include <cuda_bf16.h>
 
 #include <nvfp4_gemm/common/macros.cuh>

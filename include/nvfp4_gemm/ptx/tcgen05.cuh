@@ -8,7 +8,7 @@
 // new: DeepGEMM only ships MXFP4 (`kind::mxf4`, block 32, UE8M0 scales), and
 // NVFP4 is a different operand kind -- block 16 with E4M3 scales.
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>

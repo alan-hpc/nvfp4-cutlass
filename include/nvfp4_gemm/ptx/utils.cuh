@@ -5,7 +5,7 @@
 // Derived from DeepGEMM (MIT, Copyright (c) 2025 DeepSeek),
 // `deep_gemm/ptx/utils.cuh`, reduced to what this kernel uses.
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 
 #include <nvfp4_gemm/common/macros.cuh>
 

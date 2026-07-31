@@ -46,7 +46,7 @@ void launch(const KernelPtr& kernel, const LaunchConfig& config, Ts&... args)
     launch_config.blockDimY      = 1;
     launch_config.blockDimZ      = 1;
     launch_config.sharedMemBytes = static_cast<unsigned>(config.smem_size);
-    launch_config.hStream        = at::cuda::getCurrentCUDAStream();
+    launch_config.hStream        = static_cast<CUstream>(at::cuda::getCurrentCUDAStream().stream());
 
     // Programmatic dependent launch lets the next kernel start its prologue
     // while this one drains; the kernel's `cudaGridDependencySynchronize()` is

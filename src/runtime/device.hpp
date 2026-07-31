@@ -3,6 +3,7 @@
 // Device properties the launcher needs, queried once and cached.
 
 #include <string>
+#include <utility>
 
 #include <cuda_runtime.h>
 
@@ -53,20 +54,6 @@ public:
     {
         ensure_loaded();
         return {prop.major, prop.minor};
-    }
-
-    /// The `-arch` target to compile for.
-    ///
-    /// B200 (10.0) and B300 (10.3) share the SM100 *family* target, so one cubin
-    /// runs on both. `sm_100a` would be arch-specific to 10.0 and would fail to
-    /// load on a B300, which is why family targets -- and thus CUDA >= 12.9 --
-    /// are required rather than merely preferred.
-    std::string get_arch(bool support_arch_family)
-    {
-        ensure_loaded();
-        if (prop.major == 10)
-            return support_arch_family ? "100f" : "100a";
-        return std::to_string(prop.major * 10 + prop.minor) + "a";
     }
 };
 

@@ -18,6 +18,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -215,39 +217,39 @@ public:
         auto kernel = std::make_shared<Kernel>();
         NVFP4_CU_CHECK(cuModuleLoad(&kernel->module, cubin_path.string().c_str()));
 
-        // The generated translation unit instantiates exactly one kernel, so
-        // enumerating is unnecessary: look it up by its mangled prefix.
-        NVFP4_CU_CHECK(cuModuleGetFunction(&kernel->function, kernel->module, find_symbol(cubin_path).c_str()));
+        kernel->function = find_kernel(kernel->module, "sm100_bf16_dual_nvfp4_gemm_impl");
 
         loaded[key] = kernel;
         return kernel;
     }
 
 private:
-    /// Recover the mangled name of the single kernel in a cubin.
-    std::string find_symbol(const fs::path& cubin_path) const
+    /// The kernel in a freshly loaded module.
+    ///
+    /// Enumerating through the driver avoids shelling out to cuobjdump and
+    /// parsing its output format. The generated translation unit instantiates
+    /// exactly one kernel, so usually there is nothing to choose between; if
+    /// nvcc left an un-inlined helper behind, fall back to matching the name.
+    CUfunction find_kernel(CUmodule module, const std::string& hint) const
     {
-        const auto [rc, output] =
-            run_command((cuda_home / "bin" / "cuobjdump").string() + " -symbols " + cubin_path.string());
-        NVFP4_HOST_ASSERT_MSG(rc == 0, "cuobjdump failed on " + cubin_path.string());
+        unsigned int count = 0;
+        NVFP4_CU_CHECK(cuModuleGetFunctionCount(&count, module));
+        NVFP4_HOST_ASSERT_MSG(count >= 1, "the compiled module contains no kernel");
 
-        std::istringstream iss(output);
-        std::string        line;
-        while (std::getline(iss, line))
+        std::vector<CUfunction> functions(count);
+        NVFP4_CU_CHECK(cuModuleEnumerateFunctions(functions.data(), count, module));
+        if (count == 1)
+            return functions[0];
+
+        for (const auto& function : functions)
         {
-            const auto pos = line.find("STT_FUNC");
-            if (pos == std::string::npos)
-                continue;
-            std::istringstream ls(line);
-            std::string        token, last;
-            while (ls >> token)
-                last = token;
-            // Skip helper symbols nvcc emits alongside the kernel.
-            if (last.rfind("_Z", 0) == 0 and last.find("instantiate") == std::string::npos)
-                return last;
+            const char* name = nullptr;
+            if (cuFuncGetName(&name, function) == CUDA_SUCCESS and name != nullptr and
+                std::string(name).find(hint) != std::string::npos)
+                return function;
         }
-        NVFP4_HOST_ASSERT_MSG(false, "no kernel symbol found in " + cubin_path.string());
-        return {};
+        NVFP4_HOST_ASSERT_MSG(false, "none of the " + std::to_string(count) + " kernels in the module matched '" + hint + "'");
+        return nullptr;
     }
 };
 

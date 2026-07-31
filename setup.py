@@ -30,6 +30,9 @@ cxx_flags = [
 
 build_include_dirs = [
     f'{CUDA_HOME}/include',
+    # CUDA 13 moved libcu++ (`cuda/std/...`) under include/cccl. Our own headers
+    # no longer need it, but CUTLASS may.
+    f'{CUDA_HOME}/include/cccl',
     os.path.join(current_dir, 'include'),
     os.path.join(current_dir, '3rdparty/cutlass/include'),
 ]

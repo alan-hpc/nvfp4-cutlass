@@ -7,7 +7,7 @@
 
 #include <utility>
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 
 #include <nvfp4_gemm/common/macros.cuh>
 

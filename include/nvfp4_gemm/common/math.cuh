@@ -5,7 +5,7 @@
 // Derived from DeepGEMM (MIT, Copyright (c) 2025 DeepSeek),
 // `deep_gemm/common/math.cuh`, reduced to the functions this kernel calls.
 
-#include <cuda/std/cstdint>
+#include <cstdint>
 
 #include <nvfp4_gemm/common/macros.cuh>
 
