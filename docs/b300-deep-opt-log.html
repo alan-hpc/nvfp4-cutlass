@@ -583,6 +583,40 @@
   w16 已是 bk128 合法上限，加 warp 无路。探针基础设施
   （tune_timing_probe / set_probe_buffer）保留在库内供后续定位复用。</p>
 
+  <h3>协作攻坚 · packed-bf16 transform 落地——prefill −13~−17%，dual 溢价 −43%（2026-08-01）</h3>
+  <p><strong>指令探明</strong>：ptxas 在 sm_100f 下实测接受
+  <code>cvt.rn.satfinite.e2m1x2.bf16x2</code>（bf16 对 → E2M1 对，单指令）与
+  <code>cvt.rn.bf16x2.e2m1x2</code>（E2M1 字节 → bf16 对）——CUDA 头文件未包装、
+  PTX ISA 文档不显眼，但硬件路径存在。以此重写合并路径热循环
+  （<code>decompose_block_packed</code>）：整块数据全程停留在 bf16x2 寄存器对，
+  <em>没有任何元素经过 FP32</em>（仅块级标量 amax→s0→rcp 除外）。
+  amax 用 <code>__habs2/__hmax2</code>（9 对指令 vs 15 标量）、u=x·rcp(s0) 用
+  <code>__hmul2</code>（8 vs 16）、q0/q1 直接 bf16x2→E2M1；pass-2 的
+  dec(q0) 由 <code>cvt.rn.bf16x2.e2m1x2</code> 单指令给出，残差减法
+  u−dec 依 <strong>Sterbenz 引理</strong>在 bf16 中精确（两数同标度且在 2× 以内），
+  消掉了原先 dec→f16x2→f32 拓宽的 16 个 CVT 操作。三种 policy 与单遍模式全部改写。</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位（graph 中位数, µs）</th><th class="num">f32 热循环</th><th class="num">packed bf16</th><th class="num">Δ</th></tr>
+    <tr><td>prefill 2k gate_up dual</td><td class="num">24.9</td><td class="num"><strong>20.54</strong></td><td class="num">−17.5%</td></tr>
+    <tr><td>prefill 8k gate_up dual</td><td class="num">63.52</td><td class="num"><strong>55.31</strong></td><td class="num">−12.9%</td></tr>
+    <tr><td>prefill 8k gate_up single</td><td class="num">49.16</td><td class="num"><strong>47.11</strong></td><td class="num">−4.2%</td></tr>
+    <tr><td>prefill 8k down dual</td><td class="num">32.8</td><td class="num"><strong>30.72</strong></td><td class="num">−6.3%</td></tr>
+    <tr><td>prefill 16k gate_up dual</td><td class="num">83.7</td><td class="num"><strong>70.49</strong></td><td class="num">−15.8%</td></tr>
+    <tr><td>prefill 16k down dual</td><td class="num">55.0</td><td class="num"><strong>49.14</strong></td><td class="num">−10.7%</td></tr>
+    <tr><td>decode 16/128 gate_up、16 down（swap）</td><td class="num">10.26/16.42/6.19</td><td class="num">10.26/16.39/6.16</td><td class="num">±0（transform 不在关键路径，符合模型）</td></tr>
+  </table></div>
+  <p><strong>dual 溢价</strong>：8k gate_up 14.4 → <strong>8.2 µs</strong>（−43%）。
+  warp 时钟复测（同一探针、同一 w16/cd64 配置）：transform 占空比 87% → 77%，
+  仍是四角色最高——闭合校验 dual−single work 差 0.26 µs/kb × 26.5 kb/SM ≈ 7.0 µs ≈
+  端到端溢价 8.2 µs ✓。<strong>精度</strong>：div8 0.999921 / amax 0.999958 / div4 0.999898
+  （vs f32 路径差 ≤5e-6，bf16 双舍入噪声级；rcp(s0) 现以 bf16 精度进乘法，
+  E2M1 只有 1 位尾数，8 位中间精度仍余 7 位裕量）；swap 三点位同过；
+  单遍 0.9954＝纯 NVFP4 的固有值（阶梯里那条 FAIL 是判据放错行，非回归）。</p>
+  <p><strong>探针读数勘误</strong>：tune_timing_probe=3 的四个角色把各自 iters 累加进同一
+  槽位 8，读方须除以 slot8/4；且 cycles 是 148 SM 的 atomicAdd 总和、kb 也是全局计数，
+  两者相除天然自归一。启发式 gate 只看四个形状 knob，probe knob 不在其中——
+  探针工况与生产工况同为 w16/cd64，数据可直接对照。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

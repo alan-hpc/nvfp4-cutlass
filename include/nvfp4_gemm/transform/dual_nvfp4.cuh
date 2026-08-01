@@ -204,6 +204,110 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
     }
 }
 
+/// Packed-BF16 Algorithm 1: the whole block stays in bf16x2 pairs.
+///
+/// SM100 converts bf16x2 to and from E2M1 pairs directly, so no element ever
+/// visits FP32 except the per-block scalars (amax -> s0 -> rcp).  Precision
+/// argument: u is quantized to E2M1 (1 mantissa bit), so bf16 intermediates
+/// (8 bits) keep 7 bits of headroom; and the residual subtraction u - dec(q0)
+/// is exact in bf16 by Sterbenz's lemma whenever the two are within 2x, which
+/// the E2M1 grid guarantees away from dec = 0 (where the subtraction is
+/// trivially exact).  Warp clocks showed the FP32 hot loop at 87% duty on the
+/// prefill critical path; this cuts its CVT traffic by ~a third and halves
+/// the vector-ALU chains.
+template<ScalePolicy kScalePolicy, bool kEnableResidualPass = true>
+CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
+                                           uint8_t (&q0_bytes)[kBlockSize / 2],
+                                           uint8_t (&q1_bytes)[kBlockSize / 2],
+                                           uint32_t& s0_code,
+                                           uint32_t& s1_code)
+{
+    // 1: block amax, on packed pairs.
+    __nv_bfloat162 m = __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[0]));
+#pragma unroll
+    for (uint32_t i = 1; i < kBlockSize / 2; ++i)
+        m = __hmax2(m, __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[i])));
+    const float amax = fmaxf(__bfloat162float(m.x), __bfloat162float(m.y));
+
+    // 2: s0, identical to the scalar path (the rounded value must flow on).
+    constexpr float kFloor = kScalePolicy == ScalePolicy::ResidualAmax
+                                 ? 1.0f / 512.0f
+                                 : kS0FloorDerivedDiv8;
+    s0_code                = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
+    const float s0f        = ptx::cvt_e4m3_to_f32(s0_code);
+    const float inv_s0     = math::fast_rcp(s0f);
+
+    // 3: u = x * rcp(s0) and q0, two elements per instruction throughout.
+    const __nv_bfloat162 inv2 = __float2bfloat162_rn(inv_s0);
+    uint32_t             u2[kBlockSize / 2];
+#pragma unroll
+    for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+    {
+        const __nv_bfloat162 u =
+            __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&xw[i]), inv2);
+        u2[i]       = *reinterpret_cast<const uint32_t*>(&u);
+        q0_bytes[i] = static_cast<uint8_t>(ptx::cvt_e2m1x2_bf16x2(u2[i]));
+    }
+
+    if constexpr (not kEnableResidualPass)
+    {
+        s1_code = ptx::cvt_e4m3(s0f / kResidualRadix<kScalePolicy>);
+#pragma unroll
+        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+            q1_bytes[i] = 0;
+        return;
+    }
+
+    // 5/6: residual pass, still packed.
+    if constexpr (kScalePolicy != ScalePolicy::ResidualAmax)
+    {
+        constexpr float      kRadix = kResidualRadix<kScalePolicy>;
+        const __nv_bfloat162 radix2 = __float2bfloat162_rn(kRadix);
+        s1_code                     = ptx::cvt_e4m3(s0f / kRadix);
+#pragma unroll
+        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+        {
+            const uint32_t       dec_bits = ptx::cvt_bf16x2_e2m1x2(q0_bytes[i]);
+            const __nv_bfloat162 r        = __hmul2(
+                __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&u2[i]),
+                        *reinterpret_cast<const __nv_bfloat162*>(&dec_bits)),
+                radix2);
+            q1_bytes[i] = static_cast<uint8_t>(
+                ptx::cvt_e2m1x2_bf16x2(*reinterpret_cast<const uint32_t*>(&r)));
+        }
+    }
+    else
+    {
+        // Absolute-domain residual (r = (u - dec) * s0), then its own amax.
+        const __nv_bfloat162 s0f2 = __float2bfloat162_rn(s0f);
+        uint32_t             r2[kBlockSize / 2];
+        __nv_bfloat162       rm = __float2bfloat162_rn(0.0f);
+#pragma unroll
+        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+        {
+            const uint32_t       dec_bits = ptx::cvt_bf16x2_e2m1x2(q0_bytes[i]);
+            const __nv_bfloat162 r        = __hmul2(
+                __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&u2[i]),
+                        *reinterpret_cast<const __nv_bfloat162*>(&dec_bits)),
+                s0f2);
+            r2[i] = *reinterpret_cast<const uint32_t*>(&r);
+            rm    = __hmax2(rm, __habs2(r));
+        }
+        const float r_amax = fmaxf(__bfloat162float(rm.x), __bfloat162float(rm.y));
+        s1_code            = ptx::cvt_e4m3(fmaxf(r_amax * kInvE2M1Max, 1.0f / 512.0f));
+        const __nv_bfloat162 inv_s1_2 =
+            __float2bfloat162_rn(math::fast_rcp(ptx::cvt_e4m3_to_f32(s1_code)));
+#pragma unroll
+        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+        {
+            const __nv_bfloat162 q =
+                __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&r2[i]), inv_s1_2);
+            q1_bytes[i] = static_cast<uint8_t>(
+                ptx::cvt_e2m1x2_bf16x2(*reinterpret_cast<const uint32_t*>(&q)));
+        }
+    }
+}
+
 /// Transform one A tile: BF16 [BLOCK_M, BLOCK_K] -> (A0, SFA0) + (A1, SFA1).
 ///
 /// Thread mapping: every thread owns one whole -- or, at 16 warps, exactly half
@@ -272,8 +376,8 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         const uint32_t atom_idx = atom_seq % kAtomsPerRow;
         const uint32_t k_base   = atom_idx * kKPerSFAtom + sub * kElemsPerSlot;
 
-        // ---- Load the slot's BF16 as swizzled 16-byte groups -----------------
-        float x[kElemsPerSlot];
+        // ---- Load the slot's BF16 as swizzled 16-byte groups, kept packed ----
+        uint32_t xw[kElemsPerSlot / 2];
 #pragma unroll
         for (uint32_t g = 0; g < kElemsPerSlot * sizeof(__nv_bfloat16) / 16; ++g)
         {
@@ -281,17 +385,10 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
             const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleAMode>(m, k_byte);
             const uint4    raw    = ptx::ld_shared(
                 reinterpret_cast<const uint4*>(reinterpret_cast<const uint8_t*>(smem_a) + offset));
-
-            // Each uint32 holds two BF16; widen both.
-            const uint32_t words[4] = {raw.x, raw.y, raw.z, raw.w};
-#pragma unroll
-            for (uint32_t w = 0; w < 4; ++w)
-            {
-                const __nv_bfloat162 pair = *reinterpret_cast<const __nv_bfloat162*>(&words[w]);
-                const float2         vals = __bfloat1622float2(pair);
-                x[g * 8 + w * 2]          = vals.x;
-                x[g * 8 + w * 2 + 1]      = vals.y;
-            }
+            xw[g * 4 + 0] = raw.x;
+            xw[g * 4 + 1] = raw.y;
+            xw[g * 4 + 2] = raw.z;
+            xw[g * 4 + 3] = raw.w;
         }
 
         // ---- Algorithm 1 on each of the slot's 16-element blocks -------------
@@ -302,14 +399,14 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
 #pragma unroll
         for (uint32_t b = 0; b < kBlocksPerSlot; ++b)
         {
-            float block[kBlockSize];
+            uint32_t block[kBlockSize / 2];
 #pragma unroll
-            for (uint32_t i = 0; i < kBlockSize; ++i)
-                block[i] = x[b * kBlockSize + i];
+            for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+                block[i] = xw[b * (kBlockSize / 2) + i];
 
             uint8_t  q0_bytes[kBlockSize / 2], q1_bytes[kBlockSize / 2];
             uint32_t s0_code, s1_code;
-            decompose_block<kScalePolicy, kEnableResidualPass>(
+            decompose_block_packed<kScalePolicy, kEnableResidualPass>(
                 block,
                 q0_bytes,
                 q1_bytes,

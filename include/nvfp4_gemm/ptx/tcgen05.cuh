@@ -134,6 +134,41 @@ CUTLASS_DEVICE uint32_t cvt_e2m1x2_to_f16x2(const uint32_t& packed)
     return *reinterpret_cast<const uint32_t*>(&halves);
 }
 
+/// Packed BF16 pair -> E2M1 pair, one instruction, no FP32 round trip.
+///
+/// SM100's converter accepts bf16x2 directly (probed: ptxas assembles
+/// `cvt.rn.satfinite.e2m1x2.bf16x2` under sm_100f). The low bf16 half lands
+/// in the low nibble, mirroring the f32 variant's packing order.
+CUTLASS_DEVICE uint32_t cvt_e2m1x2_bf16x2(const uint32_t& pair)
+{
+    uint32_t r;
+    asm volatile(
+        "{\n\t"
+        ".reg .b8 t;\n\t"
+        "cvt.rn.satfinite.e2m1x2.bf16x2 t, %1;\n\t"
+        "cvt.u32.u8 %0, t;\n\t"
+        "}\n" : "=r"(r) : "r"(pair));
+    return r;
+}
+
+/// Decode a packed E2M1 byte straight into a BF16 pair.
+///
+/// The packed residual path subtracts `dec(q0)` from `u` in bf16x2; both are
+/// exact on the E2M1 grid's scale, and by Sterbenz's lemma the subtraction of
+/// two bf16 numbers within 2x of each other is exact, so nothing here loses
+/// bits the E2M1 quantization of the residual would have kept.
+CUTLASS_DEVICE uint32_t cvt_bf16x2_e2m1x2(const uint32_t& packed)
+{
+    uint32_t r;
+    asm volatile(
+        "{\n\t"
+        ".reg .b8 t;\n\t"
+        "cvt.u8.u32 t, %1;\n\t"
+        "cvt.rn.bf16x2.e2m1x2 %0, t;\n\t"
+        "}\n" : "=r"(r) : "r"(packed));
+    return r;
+}
+
 /// Decode an E4M3 byte to FP32.
 ///
 /// `s0` has to come back to FP32 to build the reciprocal and to derive `s1`, and
