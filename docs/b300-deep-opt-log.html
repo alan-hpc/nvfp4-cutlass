@@ -872,6 +872,24 @@
   下一主线:异深 stage(bk128 逻辑 s4,B×4 其余×3 + cd32,回归周期 664/kb → ~43µs),
   对抗评审进行中。</p>
 
+  <h3>消除空窗战役 · R35 异深 stage 落地——逻辑 s4 兑现(2026-08-02 凌晨)</h3>
+  <p><strong>按缓冲寿命分级的流水深度</strong>:A 活到 transform 结束(×3,影子等待
+  transform_full[t−3]);transform 产物 A0/A1/SFA 只活到 UMMA 读毕(×2,等待
+  empty[t−2]);B/SFB 与 empty 同释放窗,必须全深(×4)——评审的 blocker:SFB 若 ×3
+  会原样重建 834 环。省出 ~46KB 换回 cd64 双缓冲 epilogue + 第 4 个逻辑 stage。</p>
+  <p><strong>过程教训(全实测)</strong>:首版 shallow-uniform+cd32 反而 53.0——warp 时钟
+  显示 mainloop period 确已降到 789(<b>深度机制成立</b>),但 cd32×16 个单缓冲 store 把
+  epilogue 撑成新墙(3.66µs/tile);产物类降到 ×2 买回 cd64 后一切归位。双影子游标、
+  slot=t mod depth(非 stage mod depth)、描述符 lane 表按产物深度——评审逐条兑现。</p>
+  <div class="tablewrap"><table>
+    <tr><th>8k gate_up 里程</th><th class="num">goal 起点</th><th class="num">bk64/s6(R33)</th><th class="num">+tw16(R34)</th><th class="num">异深 s4(R35)</th></tr>
+    <tr><td>µs</td><td class="num">51.3</td><td class="num">49.2</td><td class="num">49.0</td><td class="num"><strong>47.70</strong></td></tr>
+  </table></div>
+  <p>16k gu 62.43(抖动带消失);down/sub-wave/decode 不受扰(启发式按 K 分流:
+  multiwave 且 K≥1024 → bk128/w16/cd64/s4/sh3/pr2;K<1024 → bk64/tw16/s6)。
+  正确性全逐位。新画像:period 757/kb,tfm work 564(74.5%),probe4 窗口仍 ~12.5µs
+  (上界 34.9)。计数 0/20。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
