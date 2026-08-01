@@ -652,6 +652,34 @@
   且 tw8≈tw16 旁证 transform 饱和度已降(duty 71%)。vs mxfp8 prefill 差距
   1.72×→1.49×→<b>1.39×</b>(51.33 vs 37.0);decode128 反超幅度扩大(14.37 vs 18.46)。</p>
 
+  <h3>协作攻坚 · R26 V3 后的 prefill bound 裁决(2026-08-01 夜)</h3>
+  <p><strong>仪器升级</strong>:warp 时钟探针改为每角色独立 iters 槽位(slot 9..12)——
+  旧 slot8 共享计数把 epilogue 的按-tile 计数混进按-kb 归一,V3 前后的绝对值都被
+  轻度失真。修正后(dual,µs/自身迭代):tma 0.730/0.052 · tfm 0.230/0.604 ·
+  mma 0.585/0.208 · epi(每 tile)13.19/1.98。<strong>三条 kb 链几乎打平</strong>
+  (总和 0.782/0.834/0.793,差距 &lt;7%),transform 仍以 72% 占空比居首但优势已薄。</p>
+  <p><strong>剩余溢价重归因</strong>(V3,dual−single = 4.32 µs):去 SFA1-UTCCP +0.21、
+  去第二条 UMMA +2.23、transform 残差余项 ~1.9——pass-2 的可优化余量只剩 ~2 µs。</p>
+  <p><strong>DRAM 疑云与裁决</strong>:ncu SOL 报 DRAM 83.9%、字节计数 read 268 + write
+  260 MB(校准实验证明计数器诚实:256 MiB add kernel 报 268.45 MB=单位换算)。但真实
+  51.3 µs 反推 10.3 TB/s 超峰值,ncu 工况(慢 1.6×、串行化)不可外推。
+  <strong>时钟缩放裁决实验</strong>(锁 GPU2 SM 1050 MHz,跑完即恢复):51.33 → 84.67 µs
+  (×1.65 ≈ 时钟比的 85%)⇒ 两点线性分解:<b>~38 µs 随 SM 时钟缩放(SM 域:transform
+  计算 + UMMA 发射/同步链 + epilogue)+ ~13 µs 时钟不变(HBM/L2 交付与延迟底)</b>。
+  prefill 不是显存带宽墙。ncu 写侧 260 MB vs D 输出 21 MB 的 12× 放大存疑未解,
+  但已与真实工况脱钩,不再追。</p>
+  <p><strong>Wave 量化是一阶项</strong>:8k gate_up = 320 tiles / 148 SM = 2.16 waves,
+  ceil=3 ⇒ 24 个 SM 扛 3 tile、124 个只扛 2,关键路径比均值长 39%——这补上了角色
+  链总和(~29 µs 均值)与 51.3 µs 墙钟的缺口;16k(640/148=4.32,ceil 5,+16%)
+  相对更高效的原因亦在此。sched_group 4/8/16/32 在新 regime 重测仍全平(51.25–51.47)。</p>
+  <blockquote><strong>R26 结论(当前 prefill bound 排序)</strong>:
+  ① SM 域扁平三链(transform 72% 占空比居首,但 tma/mma 已咬住)≈38 µs,其中
+  wave-ceil 量化贡献关键路径 +39%;② 时钟不变的交付/延迟底 ≈13 µs;③ 溢价侧
+  UMMA2 的 2.23 µs 是算法成本。<strong>可动的下一杠杆</strong>(均为结构级,knob 已尽):
+  transform 并行度 &gt;16 warps(需 sub-128 store tile 或 epilogue warp 兼职)、
+  更细 N-tile 降低 wave 量化(但会翻倍 transform 总量,当前得不偿失)、
+  2-SM UMMA+真多播攻 13 µs 交付底(旧存档路线,regime 变化后值得重估)。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

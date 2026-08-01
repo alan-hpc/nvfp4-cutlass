@@ -154,7 +154,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             {
                 atomicAdd(probe_buf + role * 2 + 0, probe_wait);
                 atomicAdd(probe_buf + role * 2 + 1, probe_work);
+                // Slot 8 keeps the all-role sum; 9+role is per role, so each
+                // role's wait+work normalizes by its OWN iteration count (the
+                // epilogue counts tiles, the others count k-blocks).
                 atomicAdd(probe_buf + 8, probe_iters);
+                atomicAdd(probe_buf + 9 + role, probe_iters);
                 probe_wait = probe_work = probe_iters = 0;
             }
         }
