@@ -435,6 +435,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             {
                 full_barriers[stage_idx]->wait(phase);
 
+                // Pair-decompose off: the interleaved two-block variant's
+                // register footprint costs 2 us at bk256/tw8 decode128.
                 transform::transform_a_tile<
                     BLOCK_T,
                     BLOCK_K,
@@ -442,7 +444,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     kSwizzleABMode,
                     kNumTransformThreads,
                     kScalePolicy,
-                    kEnableResidualPass>(
+                    kEnableResidualPass,
+                    /*kPairDecompose=*/false>(
                     smem_act[stage_idx],
                     smem_act0[stage_idx],
                     smem_act1[stage_idx],

@@ -472,7 +472,7 @@ CUTLASS_DEVICE void decompose_block_packed_x2(const uint32_t (&xa)[kBlockSize / 
 /// extra reduction in the transform shows up 1:1 in kernel latency).  With one
 /// atom per thread the warp count is capped at 8 by task count; halving the
 /// slot doubles the usable warps to 16.
-template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true>
+template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true, bool kPairDecompose = true>
 CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
                                      uint8_t*             smem_a0,
                                      uint8_t*             smem_a1,
@@ -537,36 +537,66 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         uint32_t q0[kElemsPerSlot / 8];
         uint32_t q1[kElemsPerSlot / 8];
         uint32_t sf0_word = 0, sf1_word = 0;
-        NVFP4_STATIC_ASSERT(kBlocksPerSlot % 2 == 0, "Pairwise decompose needs an even slot");
-#pragma unroll
-        for (uint32_t p = 0; p < kBlocksPerSlot / 2; ++p)
+        // Half-atom slots (2 blocks) take the interleaved two-block path: it
+        // shortens the per-slot chain, which is the pacing recurrence in the
+        // deep-stage regime (bk64/s6: 50.6 -> 49.2 us at 8k).  Whole-atom
+        // slots (4 blocks) stay on the per-block loop -- the pair variant's
+        // register footprint cost 2 us at swap decode128 (bk256/tw8).
+        if constexpr (kBlocksPerSlot == 2 and kPairDecompose)
         {
             uint32_t ba[kBlockSize / 2], bb[kBlockSize / 2];
 #pragma unroll
             for (uint32_t i = 0; i < kBlockSize / 2; ++i)
             {
-                ba[i] = xw[(2 * p) * (kBlockSize / 2) + i];
-                bb[i] = xw[(2 * p + 1) * (kBlockSize / 2) + i];
+                ba[i] = xw[i];
+                bb[i] = xw[kBlockSize / 2 + i];
             }
-
+            uint32_t s0ca, s0cb, s1ca, s1cb;
             uint32_t q0a[kBlockSize / 8], q0b[kBlockSize / 8];
             uint32_t q1a[kBlockSize / 8], q1b[kBlockSize / 8];
-            uint32_t s0ca, s0cb, s1ca, s1cb;
             decompose_block_packed_x2<kScalePolicy, kEnableResidualPass>(
                 ba, bb, q0a, q0b, q1a, q1b, s0ca, s0cb, s1ca, s1cb);
-
 #pragma unroll
             for (uint32_t w = 0; w < kBlockSize / 8; ++w)
             {
-                q0[(2 * p) * (kBlockSize / 8) + w]     = q0a[w];
-                q0[(2 * p + 1) * (kBlockSize / 8) + w] = q0b[w];
-                q1[(2 * p) * (kBlockSize / 8) + w]     = q1a[w];
-                q1[(2 * p + 1) * (kBlockSize / 8) + w] = q1b[w];
+                q0[w]                    = q0a[w];
+                q0[kBlockSize / 8 + w]   = q0b[w];
+                q1[w]                    = q1a[w];
+                q1[kBlockSize / 8 + w]   = q1b[w];
             }
-            // The scales of an atom pack into one word, in sub-block order; a
-            // half-atom slot fills its two bytes of that word.
-            sf0_word |= s0ca << ((2 * p) * 8) | s0cb << ((2 * p + 1) * 8);
-            sf1_word |= s1ca << ((2 * p) * 8) | s1cb << ((2 * p + 1) * 8);
+            sf0_word = s0ca | s0cb << 8;
+            sf1_word = s1ca | s1cb << 8;
+        }
+        else
+        {
+#pragma unroll
+            for (uint32_t b = 0; b < kBlocksPerSlot; ++b)
+            {
+                uint32_t block[kBlockSize / 2];
+#pragma unroll
+                for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+                    block[i] = xw[b * (kBlockSize / 2) + i];
+
+                uint32_t q0wb[kBlockSize / 8], q1wb[kBlockSize / 8];
+                uint32_t s0_code, s1_code;
+                decompose_block_packed<kScalePolicy, kEnableResidualPass>(
+                    block,
+                    q0wb,
+                    q1wb,
+                    s0_code,
+                    s1_code);
+
+#pragma unroll
+                for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+                {
+                    q0[b * (kBlockSize / 8) + w] = q0wb[w];
+                    q1[b * (kBlockSize / 8) + w] = q1wb[w];
+                }
+                // The scales of an atom pack into one word, in sub-block
+                // order; a half-atom slot fills its two bytes of that word.
+                sf0_word |= s0_code << (b * 8);
+                sf1_word |= s1_code << (b * 8);
+            }
         }
 
 // ---- Store A0 / A1 as swizzled 16-byte groups ------------------------

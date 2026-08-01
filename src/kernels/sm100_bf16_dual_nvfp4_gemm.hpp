@@ -113,7 +113,7 @@ struct DualNVFP4Config
                                   "forced num_stages does not fit into shared memory");
             return;
         }
-        for (int candidate = 4; candidate >= 1; --candidate)
+        for (int candidate = 8; candidate >= 1; --candidate)
         {
             num_stages = candidate;
             if (smem_size() <= kSmemCapacitySm100)
@@ -249,13 +249,31 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     if (tune_epilogue_stages > 0)
         config.forced_epilogue_stages = tune_epilogue_stages;
 
+    // Steady state is the stage-lifecycle loop divided by the pipeline depth
+    // (R33 in the opt log), so once the grid runs two-plus waves a half-size
+    // k-block that fits SIX stages beats the full-size one at three: measured
+    // on every multi-wave prefill point (largest: 16k down 47.0 -> 41.2 us),
+    // while sub-wave shapes lose to the deeper prologue and keep the old
+    // default. Same all-knobs-untouched gate as the rule below.
+    const int  heuristic_tiles = ((m + config.block_m - 1) / config.block_m) *
+                                ((n + config.block_n - 1) / config.block_n);
+    const bool multiwave = heuristic_tiles >= 2 * device_runtime->get_num_sms();
+    if (tune_swizzle_cd == 0 and tune_transform_warps == 0 and tune_block_n == 0 and
+        tune_block_k == 0 and tune_num_stages == 0 and multiwave)
+    {
+        config.block_k             = 64;
+        config.swizzle_ab_mode     = 32;
+        config.num_transform_warps = 8;
+        config.swizzle_cd_mode     = 64;
+        // compute_stages' deepest-fit picks 6 for this geometry.
+    }
     // Measured default for deep-K shapes (Qwen3.5-35B-A3B gate_up, N=1024
     // K=2048, B300): the 64 B CD swizzle admits a third mainloop stage and 16
     // transform warps deepen the overlap -- +11..15% beyond one wave, neutral
     // below it. Short-K shapes (down, K=512) lose from the doubled TMA stores,
     // so the switch is keyed on K. Any explicit tune argument wins.
-    if (tune_swizzle_cd == 0 and tune_transform_warps == 0 and tune_block_n == 0 and
-        tune_block_k == 0 and k >= 1024)
+    else if (tune_swizzle_cd == 0 and tune_transform_warps == 0 and tune_block_n == 0 and
+             tune_block_k == 0 and k >= 1024)
     {
         config.swizzle_cd_mode     = 64;
         config.num_transform_warps = 16;
