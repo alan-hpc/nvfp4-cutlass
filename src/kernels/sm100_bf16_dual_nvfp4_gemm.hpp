@@ -106,8 +106,8 @@ struct DualNVFP4Config
 
     int smem_barriers() const
     {
-        // Four per-stage rows: full, empty, transform-full and A0-full.
-        return (4 * num_stages + 2 * num_epilogue_stages()) * 8 + 8;
+        // Five per-stage rows: full, full-A, empty, transform-full, A0-full.
+        return (5 * num_stages + 2 * num_epilogue_stages()) * 8 + 8;
     }
 
     int smem_size() const

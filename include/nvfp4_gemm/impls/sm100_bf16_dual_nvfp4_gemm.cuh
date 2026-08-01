@@ -240,22 +240,27 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     auto barrier_start_ptr = reinterpret_cast<Barrier*>(smem_buffer + kOffsetBarriers);
     auto full_barriers     = utils::PatternVisitor(
         [=](const uint32_t& i) { return barrier_start_ptr + i; });
-    auto empty_barriers = utils::PatternVisitor(
+    // A-only arrival: the transform needs just A, and the TMA engine lands
+    // A (issued first) ahead of B/SFB -- waiting for the combined barrier
+    // put their tx tail on the transform's critical chain (R36).
+    auto full_a_barriers = utils::PatternVisitor(
         [=](const uint32_t& i) { return barrier_start_ptr + kNumStages + i; });
+    auto empty_barriers = utils::PatternVisitor(
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 2 + i; });
     // Signalled once the stage's A0/A1/SFA0/SFA1 are complete *and* SFB has been
     // transposed -- the MMA warp's single wait covers both producers.
     auto transform_full_barriers = utils::PatternVisitor(
-        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 2 + i; });
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 3 + i; });
     // A0/SFA0 readiness, for the split-transform pipeline: MMA's first pass
     // waits this instead of the full transform barrier.
     auto a0_full_barriers = utils::PatternVisitor(
-        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 3 + i; });
-    auto tmem_full_barriers = utils::PatternVisitor(
         [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 4 + i; });
+    auto tmem_full_barriers = utils::PatternVisitor(
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 5 + i; });
     auto tmem_empty_barriers = utils::PatternVisitor(
-        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 4 + kNumEpilogueStages + i; });
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 5 + kNumEpilogueStages + i; });
     auto tmem_ptr_in_smem = reinterpret_cast<uint32_t*>(
-        barrier_start_ptr + kNumStages * 4 + kNumEpilogueStages * 2);
+        barrier_start_ptr + kNumStages * 5 + kNumEpilogueStages * 2);
 
     if (warp_idx == 1 and cute::elect_one_sync())
     {
@@ -263,6 +268,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         for (uint32_t i = 0; i < kNumStages; ++i)
         {
             full_barriers[i]->init(1);
+            full_a_barriers[i]->init(1);
             empty_barriers[i]->init(1);
             // Split mode: pass 0 needs A0/SFA0 (transform) plus SFB (warp 2),
             // so those arrivals move to the A0 barrier and the full barrier
@@ -369,12 +375,15 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 // read A via LDG instead, so its 32 KB never crosses the TMA
                 // ingress port and the copy is skipped outright.
                 if constexpr (not kDirectGlobalA)
+                {
                     tma::copy<BLOCK_K, BLOCK_M, kSwizzleAMode, __nv_bfloat16>(
                         &tensor_map_a,
-                        full_barriers[stage_idx],
+                        full_a_barriers[stage_idx],
                         smem_a[slot_sh],
                         k_idx,
                         m_idx);
+                    full_a_barriers[stage_idx]->arrive_and_expect_tx(SMEM_A_SIZE_PER_STAGE);
+                }
                 // W is packed E2M1 under `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B`,
                 // whose global dims and coordinates are counted in *FP4 elements*
                 // even though shared memory receives two of them per byte.  With
@@ -388,8 +397,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     k_idx,
                     n_idx);
 
-                uint32_t num_arrival_bytes =
-                    (kDirectGlobalA ? 0 : SMEM_A_SIZE_PER_STAGE) + SMEM_B_SIZE_PER_STAGE;
+                uint32_t num_arrival_bytes = SMEM_B_SIZE_PER_STAGE;
 
                 const uint32_t sfb_k_idx = sfb_k_base + k_idx / UMMA_K;
                 tma::copy<BLOCK_N, kNumKAtoms, 0>(
@@ -472,6 +480,10 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     a0_full_barriers[stage_idx]->wait(phase);
                 else
                     transform_full_barriers[stage_idx]->wait(phase);
+                // B/SFB landing gate: the UMMA reads B from SMEM right after
+                // issue, and the transform no longer vouches for it.  Lands
+                // well before the transform finishes -- fast-path.
+                full_barriers[stage_idx]->wait(phase);
                 const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
                 ptx::tcgen05_after_thread_sync();
 
@@ -670,7 +682,10 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
                 const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
-                full_barriers[stage_idx]->wait(phase);
+                if constexpr (kDirectGlobalA)
+                    full_barriers[stage_idx]->wait(phase);
+                else
+                    full_a_barriers[stage_idx]->wait(phase);
                 if constexpr (kProducedStages != kNumStages)
                     // The A0/A1/SFA slot recycles from logical t - produced:
                     // wait its UMMA reads (the empty commit covers UTCCP and
