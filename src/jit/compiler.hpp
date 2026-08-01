@@ -163,6 +163,28 @@ public:
                               "CUDA >= 12.9 required, found " + std::to_string(major) + "." + std::to_string(minor));
         signature = "nvcc" + std::to_string(major) + "." + std::to_string(minor);
 
+        // The cache key must change when the device headers change, or an edit
+        // to a `.cuh` is silently ignored and the stale cubin keeps running --
+        // which produces measurements that contradict the source being read.
+        // Content-hash everything under `nvfp4_gemm/` (the headers that change
+        // during development) into the signature. CUTLASS headers are pinned by
+        // the submodule and excluded: hashing ~2300 files at import time costs
+        // more than the protection is worth.
+        {
+            size_t header_hash = 0;
+            for (const auto& entry : fs::recursive_directory_iterator(include_root / "nvfp4_gemm"))
+            {
+                if (not entry.is_regular_file())
+                    continue;
+                std::ifstream     in(entry.path(), std::ios::binary);
+                std::stringstream ss;
+                ss << in.rdbuf();
+                // XOR-combine keeps the fold independent of traversal order.
+                header_hash ^= std::hash<std::string>{}(entry.path().filename().string() + ss.str());
+            }
+            signature += ".hdr" + std::to_string(header_hash);
+        }
+
         arch_flags = resolve_arch_flags();
 
         std::ostringstream oss;
@@ -181,7 +203,7 @@ public:
     }
 
     /// Compile `code` (or reuse a cached cubin) and return the single kernel in it.
-    KernelPtr build(const std::string& name, const std::string& code)
+    KernelPtr build(const std::string& name, const std::string& code, const std::string& symbol_hint = "sm100_bf16_dual_nvfp4_gemm_impl")
     {
         NVFP4_HOST_ASSERT_MSG(is_initialized(), "compiler not initialized; call nvfp4_gemm._C.init()");
 
@@ -217,7 +239,7 @@ public:
         auto kernel = std::make_shared<Kernel>();
         NVFP4_CU_CHECK(cuModuleLoad(&kernel->module, cubin_path.string().c_str()));
 
-        kernel->function = find_kernel(kernel->module, "sm100_bf16_dual_nvfp4_gemm_impl");
+        kernel->function = find_kernel(kernel->module, symbol_hint);
 
         loaded[key] = kernel;
         return kernel;

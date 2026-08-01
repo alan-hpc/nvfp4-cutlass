@@ -50,4 +50,30 @@ CUTLASS_DEVICE void copy(void const*                               desc_ptr,
     }
 }
 
+/// Multicast variant: one L2 read lands the tile in every cluster CTA's shared
+/// memory. Issued by the cluster leader only; every receiving CTA's barrier
+/// must expect the bytes.
+template<uint32_t BLOCK_INNER, uint32_t BLOCK_OUTER, uint32_t kSwizzleMode, uint32_t kNumMulticast, typename dtype_t>
+CUTLASS_DEVICE void copy_multicast(void const*                               desc_ptr,
+                                   cutlass::arch::ClusterTransactionBarrier* barrier_ptr,
+                                   dtype_t*                                  smem_ptr,
+                                   const uint32_t&                           inner_idx,
+                                   const uint32_t&                           outer_idx)
+{
+    constexpr uint32_t BLOCK_INNER_ATOM = get_inner_block_atom_size<BLOCK_INNER, kSwizzleMode, dtype_t>();
+    constexpr uint16_t kCTAMask         = (1u << kNumMulticast) - 1;
+
+#pragma unroll
+    for (uint32_t i = 0; i < BLOCK_INNER / BLOCK_INNER_ATOM; ++i)
+    {
+        cute::SM90_TMA_LOAD_MULTICAST_2D::copy(desc_ptr,
+                                               reinterpret_cast<uint64_t*>(barrier_ptr),
+                                               kCTAMask,
+                                               static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL),
+                                               smem_ptr + i * BLOCK_OUTER * BLOCK_INNER_ATOM,
+                                               inner_idx + i * BLOCK_INNER_ATOM,
+                                               outer_idx);
+    }
+}
+
 }   // namespace nvfp4_gemm::tma

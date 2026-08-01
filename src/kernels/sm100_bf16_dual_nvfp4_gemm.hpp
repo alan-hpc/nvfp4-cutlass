@@ -42,6 +42,9 @@ struct DualNVFP4Config
     int num_transform_warps  = 8;
     int num_epilogue_threads = 128;
     int num_stages           = 0;   // filled in by `compute_stages`
+    /// 0 = derive from the TMEM budget. Forcing 1 on a slim tile halves the
+    /// TMEM footprint, which is what admits two CTAs per SM.
+    int forced_epilogue_stages = 0;
 
     int num_threads() const
     {
@@ -74,6 +77,8 @@ struct DualNVFP4Config
 
     int num_epilogue_stages() const
     {
+        if (forced_epilogue_stages > 0)
+            return forced_epilogue_stages;
         const int sf_cols = 2 * sf_atoms_per_k() * (((block_m + 127) / 128) * 4) +
                             sf_atoms_per_k() * (((block_n + 127) / 128) * 4);
         return (block_n * 2 + sf_cols <= 512) ? 2 : 1;
@@ -81,7 +86,8 @@ struct DualNVFP4Config
 
     int smem_barriers() const
     {
-        return (3 * num_stages + 2 * num_epilogue_stages()) * 8 + 8;
+        // Four per-stage rows: full, empty, transform-full and A0-full.
+        return (4 * num_stages + 2 * num_epilogue_stages()) * 8 + 8;
     }
 
     int smem_size() const
@@ -94,8 +100,19 @@ struct DualNVFP4Config
     /// Dual-A is unusually shared-memory hungry: a stage carries the BF16 A tile
     /// *and* both FP4 copies of it, so a 128x256x128 stage costs ~68 KB against
     /// ~40 KB for a plain NVFP4 GEMM. That caps the pipeline at 2 stages.
-    void compute_stages()
+    ///
+    /// `forced` (non-zero) pins the depth instead, for autotuning: a shallower
+    /// pipeline than the maximum can win by freeing shared memory, so the search
+    /// has to be able to ask for one.
+    void compute_stages(int forced = 0)
     {
+        if (forced > 0)
+        {
+            num_stages = forced;
+            NVFP4_HOST_ASSERT_MSG(smem_size() <= kSmemCapacitySm100,
+                                  "forced num_stages does not fit into shared memory");
+            return;
+        }
         for (int candidate = 4; candidate >= 1; --candidate)
         {
             num_stages = candidate;
@@ -103,6 +120,43 @@ struct DualNVFP4Config
                 return;
         }
         NVFP4_HOST_ASSERT_MSG(false, "cannot fit even a single stage into shared memory");
+    }
+
+    /// Reject configurations the kernel's static asserts would reject anyway.
+    ///
+    /// The search drives these from Python, so a bad point has to raise rather
+    /// than build a kernel whose `NVFP4_STATIC_ASSERT`s fail at nvcc time (or,
+    /// worse, one that runs and is silently wrong).
+    void validate() const
+    {
+        NVFP4_HOST_ASSERT_MSG(block_m == 128, "BLOCK_M must be 128");
+        NVFP4_HOST_ASSERT_MSG(block_n % 128 == 0 and block_n >= 128 and block_n <= 256,
+                              "BLOCK_N must be 128 or 256");
+        NVFP4_HOST_ASSERT_MSG(block_k % 64 == 0, "BLOCK_K must cover whole 64-element SF atoms");
+        NVFP4_HOST_ASSERT_MSG(swizzle_ab_mode * 2 == block_k,
+                              "packed-FP4 swizzle must cover exactly one K block");
+        // The transform deals work in 16-element blocks; a thread owns at least
+        // half a scale atom (2 blocks), so threads are capped at blocks / 2.
+        const int num_transform_threads = num_transform_warps * 32;
+        const int num_transform_blocks  = block_m * block_k / 16;
+        NVFP4_HOST_ASSERT_MSG(num_transform_warps > 0 and
+                                  num_transform_blocks % num_transform_threads == 0 and
+                                  num_transform_threads * 2 <= num_transform_blocks,
+                              "transform threads must evenly divide the A tile");
+        // `kNumUMMAStoreThreads == STORE_BLOCK_M == 128` reads the accumulator.
+        NVFP4_HOST_ASSERT_MSG(num_epilogue_threads >= std::min(block_m, 128) and
+                                  num_epilogue_threads % 32 == 0,
+                              "not enough epilogue threads");
+        // The epilogue stores 16 B bank groups: STORE_BLOCK_N = swizzle / 2
+        // BF16 elements must hold whole groups and divide the tile width.
+        NVFP4_HOST_ASSERT_MSG((swizzle_cd_mode == 64 or swizzle_cd_mode == 128) and
+                                  block_n % (swizzle_cd_mode / 2) == 0,
+                              "swizzle_cd_mode must be 64 or 128 and divide the N tile");
+        const int sf_cols = 2 * sf_atoms_per_k() * (((block_m + 127) / 128) * 4) +
+                            sf_atoms_per_k() * (((block_n + 127) / 128) * 4);
+        NVFP4_HOST_ASSERT_MSG(block_n * num_epilogue_stages() + sf_cols <= 512,
+                              "tensor memory overflow");
+        NVFP4_HOST_ASSERT_MSG(smem_size() <= kSmemCapacitySm100, "shared memory overflow");
     }
 };
 
@@ -141,10 +195,55 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
                                                             int                  n,
                                                             int                  k,
                                                             const std::string&   scale_policy,
-                                                            bool                 enable_residual_pass)
+                                                            bool                 enable_residual_pass,
+                                                            int                  tune_block_n,
+                                                            int                  tune_transform_warps,
+                                                            int                  tune_epilogue_threads,
+                                                            int                  tune_num_stages,
+                                                            int                  tune_swizzle_cd,
+                                                            int                  tune_block_k,
+                                                            int                  tune_epilogue_stages,
+                                                            int                  tune_cluster,
+                                                            int                  tune_direct_a,
+                                                            int                  tune_l2_pin_weights,
+                                                            int                  tune_no_pdl,
+                                                            int                  tune_sched_group,
+                                                            int                  tune_split_transform)
 {
     DualNVFP4Config config;
-    config.compute_stages();
+    if (tune_block_n > 0)
+        config.block_n = tune_block_n;
+    // The packed-FP4 swizzle must cover exactly one K block, so it is tied.
+    if (tune_block_k > 0)
+    {
+        config.block_k         = tune_block_k;
+        config.swizzle_ab_mode = tune_block_k / 2;
+    }
+    if (tune_transform_warps > 0)
+        config.num_transform_warps = tune_transform_warps;
+    if (tune_epilogue_threads > 0)
+        config.num_epilogue_threads = tune_epilogue_threads;
+    // A 64 B CD swizzle halves the epilogue staging buffer, which is what lets
+    // a third mainloop stage fit under the 227 KB shared-memory budget.
+    if (tune_swizzle_cd > 0)
+        config.swizzle_cd_mode = tune_swizzle_cd;
+    if (tune_epilogue_stages > 0)
+        config.forced_epilogue_stages = tune_epilogue_stages;
+
+    // Measured default for deep-K shapes (Qwen3.5-35B-A3B gate_up, N=1024
+    // K=2048, B300): the 64 B CD swizzle admits a third mainloop stage and 16
+    // transform warps deepen the overlap -- +11..15% beyond one wave, neutral
+    // below it. Short-K shapes (down, K=512) lose from the doubled TMA stores,
+    // so the switch is keyed on K. Any explicit tune argument wins.
+    if (tune_swizzle_cd == 0 and tune_transform_warps == 0 and tune_block_n == 0 and
+        tune_block_k == 0 and k >= 1024)
+    {
+        config.swizzle_cd_mode     = 64;
+        config.num_transform_warps = 16;
+    }
+
+    config.compute_stages(tune_num_stages);
+    config.validate();
 
     const int num_sms = device_runtime->get_num_sms();
 
@@ -203,9 +302,13 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
          << "        " << config.num_transform_warps << ",\n"
          << "        " << config.num_epilogue_threads << ",\n"
          << "        " << num_sms << ",\n"
+         << "        " << config.forced_epilogue_stages << ",\n"
          << "        " << to_string(GemmType::MGroupedContiguous) << ",\n"
          << "        " << scale_policy << ",\n"
-         << "        " << (enable_residual_pass ? "true" : "false") << ">);\n"
+         << "        " << (enable_residual_pass ? "true" : "false") << ",\n"
+         << "        " << (tune_direct_a ? "true" : "false") << ",\n"
+         << "        " << tune_sched_group << ",\n"
+         << "        " << (tune_split_transform ? "true" : "false") << ">);\n"
          << "    (void) ptr;\n}\n";
 
     // Distinct cache names per variant keep the two pass counts from colliding
@@ -213,7 +316,169 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     const auto kernel = jit::compiler->build(enable_residual_pass ? "bf16_dual_nvfp4_gemm" : "bf16_single_nvfp4_gemm",
                                              code.str());
 
-    jit::LaunchConfig launch_config{num_sms, config.num_threads(), config.smem_size(), true};
+    jit::LaunchConfig launch_config{num_sms, config.num_threads(), config.smem_size(),
+                                    tune_no_pdl == 0,
+                                    tune_cluster > 1 ? tune_cluster : 1};
+    if (tune_l2_pin_weights)
+    {
+        launch_config.l2_window_ptr   = b.data_ptr();
+        launch_config.l2_window_bytes = static_cast<size_t>(b.numel());
+    }
+
+    auto* grouped_layout = m_indices.data_ptr();
+    auto* global_scales  = gw.data_ptr();
+    auto  shape_m        = static_cast<uint32_t>(m);
+    auto  shape_n        = static_cast<uint32_t>(n);
+    auto  shape_k        = static_cast<uint32_t>(k);
+    auto  map_a          = tensor_map_a;
+    auto  map_b          = tensor_map_b;
+    auto  map_sfb        = tensor_map_sfb;
+    auto  map_cd         = tensor_map_cd;
+    // Direct-global-A reads the activations via LDG inside the transform; the
+    // pointer travels as a plain kernel argument next to the TMA descriptors.
+    auto* a_ptr = a.data_ptr();
+    auto  lda   = static_cast<uint32_t>(a.stride(0));
+
+    jit::launch(kernel, launch_config, grouped_layout, global_scales, shape_m, shape_n, shape_k, map_a, map_b, map_sfb, map_cd, a_ptr, lda);
+}
+
+/// Swap-AB variant for small-M batches (decode / small prefill).
+///
+/// Weights take the 128-row M side of the UMMA and tokens the N side, so the
+/// per-expert granularity is `block_t` (32) token columns instead of 128 rows,
+/// and the per-k-block delivery drops ~3x. `m_indices` groups must therefore be
+/// `block_t`-aligned, not 128-aligned. Same tensor arguments and layouts as the
+/// normal entry.
+inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous_swap_ab(const torch::Tensor& a,
+                                                                    const torch::Tensor& b,
+                                                                    const torch::Tensor& sfb,
+                                                                    const torch::Tensor& gw,
+                                                                    const torch::Tensor& d,
+                                                                    const torch::Tensor& m_indices,
+                                                                    int                  num_groups,
+                                                                    int                  m,
+                                                                    int                  n,
+                                                                    int                  k,
+                                                                    const std::string&   scale_policy,
+                                                                    bool                 enable_residual_pass,
+                                                                    int                  tune_block_t,
+                                                                    int                  tune_transform_warps,
+                                                                    int                  tune_num_stages,
+                                                                    int                  tune_block_k)
+{
+    const int block_t         = tune_block_t > 0 ? tune_block_t : 32;
+    // A deeper K block halves the number of pipeline steps -- and with them
+    // the per-k-block synchronization chain the decode floor is made of.
+    // Measured: 256 matches 128 at tiny batches and is +10% at decode-128
+    // (18.5 vs 20.5 us on gate_up), so it is the default whenever K allows.
+    const int block_k         = tune_block_k > 0 ? tune_block_k : (k % 256 == 0 ? 256 : 128);
+    const int swizzle_a_mode  = 128;
+    const int swizzle_ab_mode = block_k / 2;
+    const int swizzle_cd_mode = 128;
+    // The deeper K block doubles the transform work per pipeline step and puts
+    // it back on the critical path; 8 warps halve it again (+11..17% measured
+    // at decode). bk128's smaller tile only admits 4 (2-block slot floor).
+    const int transform_warps = tune_transform_warps > 0 ? tune_transform_warps
+                                                         : (block_k == 256 ? 8 : 4);
+    const int epilogue_threads = 128;
+    const int katoms           = block_k / 64;
+
+    NVFP4_HOST_ASSERT_MSG(block_t == 32 or block_t == 64 or block_t == 128,
+                          "block_t must be 32, 64 or 128");
+    NVFP4_HOST_ASSERT_MSG(m % block_t == 0, "M must be a multiple of block_t");
+    NVFP4_HOST_ASSERT_MSG(n % 128 == 0 and k % 128 == 0, "N and K must be multiples of 128");
+    const int transform_blocks = block_t * block_k / 16;
+    NVFP4_HOST_ASSERT_MSG(transform_blocks % (transform_warps * 32) == 0 and
+                              transform_warps * 32 * 2 <= transform_blocks,
+                          "transform threads must evenly divide the token tile");
+
+    // Shared memory: the swapped stage is tiny (~23 KB at block_t = 32), so the
+    // pipeline can go deep; past ~6 stages the returns vanish.
+    const int smem_per_stage = block_t * block_k * 2 +          // act BF16
+                               2 * (block_t * block_k / 2) +    // act0 + act1
+                               128 * block_k / 2 +              // W
+                               katoms * 128 * 4 +               // SFW
+                               2 * (katoms * 128 * 4);          // SFACT0/1
+    const int smem_cd       = 2 * block_t * 128 * 2;
+    int       num_stages    = tune_num_stages > 0 ? tune_num_stages : (block_k == 256 ? 4 : 8);
+    auto      smem_size     = [&](int stages) {
+        return smem_cd + stages * smem_per_stage + (3 * stages + 2 * 2) * 8 + 8;
+    };
+    while (num_stages > 1 and smem_size(num_stages) > kSmemCapacitySm100)
+        --num_stages;
+
+    const int num_sms = device_runtime->get_num_sms();
+
+    // Activations: BF16, K-major, block_t rows per box.
+    const auto tensor_map_a = tma::make_2d(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                           a.data_ptr(),
+                                           /*gmem_inner=*/k,
+                                           /*gmem_outer=*/m,
+                                           /*box_inner=*/swizzle_a_mode / 2,
+                                           /*box_outer=*/block_t,
+                                           /*outer_stride=*/static_cast<uint64_t>(a.stride(0)) * 2,
+                                           swizzle_a_mode);
+
+    // Weights: packed E2M1, 128 model rows per box.
+    const auto tensor_map_b = tma::make_2d(CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                           b.data_ptr(),
+                                           /*gmem_inner=*/k,
+                                           /*gmem_outer=*/static_cast<uint64_t>(n) * num_groups,
+                                           /*box_inner=*/block_k,
+                                           /*box_outer=*/128,
+                                           /*outer_stride=*/static_cast<uint64_t>(b.stride(0)),
+                                           swizzle_ab_mode);
+
+    // Weight scales: one int32 atom word per (sf_k, weight row).
+    const auto tensor_map_sfb = tma::make_2d(CU_TENSOR_MAP_DATA_TYPE_INT32,
+                                             sfb.data_ptr(),
+                                             /*gmem_inner=*/n,
+                                             /*gmem_outer=*/static_cast<uint64_t>(k / 64) * num_groups,
+                                             /*box_inner=*/128,
+                                             /*box_outer=*/katoms,
+                                             /*outer_stride=*/static_cast<uint64_t>(n) * 4,
+                                             /*swizzle=*/0);
+
+    // D: (tokens, model_n) BF16, stored in (block_t x 128) transposed tiles.
+    const auto tensor_map_cd = tma::make_2d(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                            d.data_ptr(),
+                                            /*gmem_inner=*/n,
+                                            /*gmem_outer=*/m,
+                                            /*box_inner=*/swizzle_cd_mode / 2,
+                                            /*box_outer=*/block_t,
+                                            /*outer_stride=*/static_cast<uint64_t>(d.stride(0)) * 2,
+                                            swizzle_cd_mode);
+
+    NVFP4_HOST_ASSERT_MSG(scale_policy == "derived_div8" or scale_policy == "residual_amax" or
+                              scale_policy == "derived_div4",
+                          "scale_policy must be 'derived_div8', 'derived_div4' or 'residual_amax'");
+    const std::string policy = scale_policy == "residual_amax" ? "ScalePolicy::ResidualAmax"
+                               : scale_policy == "derived_div4" ? "ScalePolicy::DerivedDiv4"
+                                                                : "ScalePolicy::DerivedDiv8";
+
+    std::ostringstream code;
+    code << "#include <nvfp4_gemm/impls/sm100_bf16_dual_nvfp4_gemm_swap_ab.cuh>\n\n"
+         << "using namespace nvfp4_gemm;\n\n"
+         << "static void __instantiate_kernel()\n{\n"
+         << "    auto ptr = reinterpret_cast<void*>(&sm100_bf16_dual_nvfp4_gemm_swap_ab_impl<\n"
+         << "        " << n << ", " << k << ",\n"
+         << "        " << block_t << ", " << block_k << ",\n"
+         << "        " << num_groups << ",\n"
+         << "        " << swizzle_a_mode << ", " << swizzle_ab_mode << ", " << swizzle_cd_mode << ",\n"
+         << "        " << num_stages << ",\n"
+         << "        " << transform_warps << ",\n"
+         << "        " << epilogue_threads << ",\n"
+         << "        " << num_sms << ",\n"
+         << "        " << policy << ",\n"
+         << "        " << (enable_residual_pass ? "true" : "false") << ">);\n"
+         << "    (void) ptr;\n}\n";
+
+    const auto kernel = jit::compiler->build("bf16_dual_nvfp4_gemm_swap_ab",
+                                             code.str(),
+                                             "sm100_bf16_dual_nvfp4_gemm_swap_ab_impl");
+
+    const int num_threads = (3 + transform_warps) * 32 + epilogue_threads;
+    jit::LaunchConfig launch_config{num_sms, num_threads, smem_size(num_stages), true};
 
     auto* grouped_layout = m_indices.data_ptr();
     auto* global_scales  = gw.data_ptr();

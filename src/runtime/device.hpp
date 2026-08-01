@@ -42,11 +42,14 @@ public:
         return num_sms != 0 ? num_sms : prop.multiProcessorCount;
     }
 
-    /// Override the SM count, e.g. to leave room for a communication kernel.
+    /// Override the persistent grid size.  Below the SM count this leaves room
+    /// for a communication kernel; above it (up to 2 per SM) it oversubscribes
+    /// so that a slim-tile configuration can co-schedule two CTAs per SM and
+    /// overlap their pipeline chains.
     void set_num_sms(int value)
     {
         ensure_loaded();
-        NVFP4_HOST_ASSERT(0 <= value and value <= prop.multiProcessorCount);
+        NVFP4_HOST_ASSERT(0 <= value and value <= 2 * prop.multiProcessorCount);
         num_sms = value;
     }
 

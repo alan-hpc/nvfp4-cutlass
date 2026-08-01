@@ -42,7 +42,7 @@ using transform::ScalePolicy;
 /// scheduler keeps that overlap, which is what `kNumEpilogueStages == 2` buys.
 /// Whether the thread saving or the overlap wins is shape-dependent and has to
 /// be settled by measurement on hardware.
-template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass>
+template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, uint32_t kNumForcedEpilogueStages, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass, bool kDirectGlobalA = false, uint32_t kNumBlocksPerGroup = 0, bool kSplitTransform = false>
 CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilogueThreads, 1)
     sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                                     const float* __restrict__ weight_global_scales,
@@ -52,7 +52,9 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                                     const __grid_constant__ cute::TmaDescriptor tensor_map_a,
                                     const __grid_constant__ cute::TmaDescriptor tensor_map_b,
                                     const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
-                                    const __grid_constant__ cute::TmaDescriptor tensor_map_cd)
+                                    const __grid_constant__ cute::TmaDescriptor tensor_map_cd,
+                                    const __nv_bfloat16* __restrict__ a_gmem,
+                                    uint32_t                          lda)
 {
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
     using Barrier     = cutlass::arch::ClusterTransactionBarrier;
@@ -92,7 +94,14 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     // NVFP4 GEMM does not, so the accumulator stage count has to be derived
     // rather than fixed at 2.  BLOCK_N = 256 leaves room for exactly one.
     constexpr uint32_t kNumSFTmemCols       = kNumSFATmemCols * 2 + kNumSFBTmemCols;
-    constexpr uint32_t kNumEpilogueStages   = (UMMA_N * 2 + kNumSFTmemCols <= 512) ? 2 : 1;
+    // A forced value below the derived one shrinks the TMEM footprint; with the
+    // slim tile that is what lets two CTAs share one SM's 512 columns.
+    constexpr uint32_t kNumDerivedEpilogueStages = (UMMA_N * 2 + kNumSFTmemCols <= 512) ? 2 : 1;
+    constexpr uint32_t kNumEpilogueStages        = kNumForcedEpilogueStages > 0
+                                                       ? kNumForcedEpilogueStages
+                                                       : kNumDerivedEpilogueStages;
+    NVFP4_STATIC_ASSERT(kNumEpilogueStages <= kNumDerivedEpilogueStages,
+                        "Forced epilogue stages exceed the tensor memory budget");
     constexpr uint32_t kNumTMAStoreStages   = 2;
     constexpr uint32_t STORE_BLOCK_M        = cute::min<uint32_t>(BLOCK_M, LAYOUT_AD_M);
     constexpr uint32_t STORE_BLOCK_N        = kSwizzleCDMode / sizeof(cd_dtype_t);
@@ -125,7 +134,9 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     constexpr uint32_t kNumNonEpilogueWarps   = 3 + kNumTransformWarps;
     constexpr uint32_t kNumNonEpilogueThreads = kNumNonEpilogueWarps * 32;
     constexpr uint32_t kFirstTransformWarp    = 3;
-    NVFP4_STATIC_ASSERT(BLOCK_M * kNumKAtoms % kNumTransformThreads == 0,
+    // Work is dealt in 16-element blocks; a thread may own as little as half a
+    // scale atom (2 blocks), which is what admits 16 transform warps.
+    NVFP4_STATIC_ASSERT(BLOCK_M * BLOCK_K / 16 % kNumTransformThreads == 0,
                         "Transform threads must evenly divide the A tile");
 
     const auto warp_idx = cutlass::canonical_warp_idx_sync();
@@ -191,12 +202,16 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     // transposed -- the MMA warp's single wait covers both producers.
     auto transform_full_barriers = utils::PatternVisitor(
         [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 2 + i; });
-    auto tmem_full_barriers = utils::PatternVisitor(
+    // A0/SFA0 readiness, for the split-transform pipeline: MMA's first pass
+    // waits this instead of the full transform barrier.
+    auto a0_full_barriers = utils::PatternVisitor(
         [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 3 + i; });
+    auto tmem_full_barriers = utils::PatternVisitor(
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 4 + i; });
     auto tmem_empty_barriers = utils::PatternVisitor(
-        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 3 + kNumEpilogueStages + i; });
+        [=](const uint32_t& i) { return barrier_start_ptr + kNumStages * 4 + kNumEpilogueStages + i; });
     auto tmem_ptr_in_smem = reinterpret_cast<uint32_t*>(
-        barrier_start_ptr + kNumStages * 3 + kNumEpilogueStages * 2);
+        barrier_start_ptr + kNumStages * 4 + kNumEpilogueStages * 2);
 
     if (warp_idx == 1 and cute::elect_one_sync())
     {
@@ -205,8 +220,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         {
             full_barriers[i]->init(1);
             empty_barriers[i]->init(1);
-            // Every transform thread arrives, plus every lane of the SFB warp.
-            transform_full_barriers[i]->init(kNumTransformThreads + 32);
+            // Split mode: pass 0 needs A0/SFA0 (transform) plus SFB (warp 2),
+            // so those arrivals move to the A0 barrier and the full barrier
+            // counts only the residual pass. Non-split keeps the single merge.
+            transform_full_barriers[i]->init(
+                kSplitTransform ? kNumTransformThreads : kNumTransformThreads + 32);
+            a0_full_barriers[i]->init(kSplitTransform ? kNumTransformThreads + 32 : 1);
         }
 #    pragma unroll
         for (uint32_t i = 0; i < kNumEpilogueStages; ++i)
@@ -225,7 +244,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     cudaGridDependencySynchronize();
 
     uint32_t m_block_idx, n_block_idx;
-    auto     scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumSMs>(
+    // The L2 grouping width defaults to the usage heuristic; a non-zero
+    // override pins it for measurement.
+    constexpr uint32_t kBPG = kNumBlocksPerGroup != 0
+                                  ? kNumBlocksPerGroup
+                                  : sched::get_num_1d_blocks_per_group<BLOCK_M, BLOCK_N, kNumSMs>();
+    auto scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumSMs, kBPG>(
         shape_m,
         shape_n,
         grouped_layout);
@@ -245,26 +269,38 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
             const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
+
+            // Tile-invariant coordinates, hoisted out of the K loop.  The
+            // expert offset inside `get_global_idx` is a dependent load of
+            // `m_indices` from global memory, and the asm barriers in the loop
+            // body otherwise force nvcc to reissue it on every K step of the
+            // producer's critical path -- twice.
+            const uint32_t m_idx = scheduler.template get_global_idx<(kGemmType == GemmType::MGroupedMasked)>(
+                shape_m,
+                BLOCK_M,
+                m_block_idx);
+            const uint32_t n_idx = scheduler.template get_global_idx<true>(shape_n, BLOCK_N, n_block_idx, m_block_idx);
+            const uint32_t sfb_n_idx  = n_block_idx * BLOCK_N;
+            const uint32_t sfb_k_base = scheduler.template get_global_idx<true>(shape_sfb_k, 1, 0, m_block_idx);
+
             for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
             {
                 empty_barriers[stage_idx]->wait(phase ^ 1);
 
-                const uint32_t m_idx = scheduler.template get_global_idx<(kGemmType == GemmType::MGroupedMasked)>(
-                    shape_m,
-                    BLOCK_M,
-                    m_block_idx);
-                const uint32_t n_idx = scheduler.template get_global_idx<true>(shape_n, BLOCK_N, n_block_idx, m_block_idx);
                 const uint32_t k_idx = k_block_idx * BLOCK_K;
 
                 // A is BF16 and K-major: 2 bytes per element, and no SFA to load
                 // -- the whole point of the fused path is that A's scales are
-                // produced on chip.
-                tma::copy<BLOCK_K, BLOCK_M, kSwizzleAMode, __nv_bfloat16>(
-                    &tensor_map_a,
-                    full_barriers[stage_idx],
-                    smem_a[stage_idx],
-                    k_idx,
-                    m_idx);
+                // produced on chip.  In direct-global mode the transform warps
+                // read A via LDG instead, so its 32 KB never crosses the TMA
+                // ingress port and the copy is skipped outright.
+                if constexpr (not kDirectGlobalA)
+                    tma::copy<BLOCK_K, BLOCK_M, kSwizzleAMode, __nv_bfloat16>(
+                        &tensor_map_a,
+                        full_barriers[stage_idx],
+                        smem_a[stage_idx],
+                        k_idx,
+                        m_idx);
                 // W is packed E2M1 under `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B`,
                 // whose global dims and coordinates are counted in *FP4 elements*
                 // even though shared memory receives two of them per byte.  With
@@ -278,14 +314,10 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     k_idx,
                     n_idx);
 
-                uint32_t num_arrival_bytes = SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE;
+                uint32_t num_arrival_bytes =
+                    (kDirectGlobalA ? 0 : SMEM_A_SIZE_PER_STAGE) + SMEM_B_SIZE_PER_STAGE;
 
-                const uint32_t sfb_n_idx = n_block_idx * BLOCK_N;
-                const uint32_t sfb_k_idx = scheduler.template get_global_idx<true>(
-                    shape_sfb_k,
-                    1,
-                    k_idx / UMMA_K,
-                    m_block_idx);
+                const uint32_t sfb_k_idx = sfb_k_base + k_idx / UMMA_K;
                 tma::copy<BLOCK_N, kNumKAtoms, 0>(
                     &tensor_map_sfb,
                     full_barriers[stage_idx],
@@ -337,7 +369,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
 #    pragma unroll 2
             for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
             {
-                transform_full_barriers[stage_idx]->wait(phase);
+                // Split pipeline: pass 0 launches on A0/SFA0/SFB readiness while
+                // the transform warps still quantize the residual.
+                if constexpr (kSplitTransform and kEnableResidualPass)
+                    a0_full_barriers[stage_idx]->wait(phase);
+                else
+                    transform_full_barriers[stage_idx]->wait(phase);
                 ptx::tcgen05_after_thread_sync();
 
                 const auto a0_base_lo = ptx::exchange(a0_desc_lo, stage_idx);
@@ -349,6 +386,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     // Copy all three scale operands into tensor memory.  SFA0 and
                     // SFA1 were written pre-transposed by the transform warps;
                     // only SFB needed warp 2's shuffle.
+                    //
+                    // (Interleaving these copies with the UMMAs below -- copy
+                    // atom 0's scales, issue atom 0's passes, copy atom 1's --
+                    // was measured at exactly zero effect on every shape, so
+                    // the hardware already overlaps UTCCP drain with UMMA
+                    // execution; keep the simpler front-loaded order.)
                     auto utccp_sf = [&](uint8_t* smem_ptr, const uint32_t& tmem_col) {
                         mma::sm100::replace_smem_desc_addr(sf_desc, smem_ptr);
                         cute::SM100_UTCCP_4x32dp128bit_1cta::copy(sf_desc, tmem_col);
@@ -362,7 +405,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                             const uint32_t byte_off = (a * kNumSFASubAtoms + i) * kNumUTCCPAlignedElems * 4;
                             const uint32_t col      = (a * kNumSFASubAtoms + i) * 4;
                             utccp_sf(smem_sfa0[stage_idx] + byte_off, kTmemStartColOfSFA0 + col);
-                            if constexpr (kEnableResidualPass)
+                            if constexpr (kEnableResidualPass and not kSplitTransform)
                                 utccp_sf(smem_sfa1[stage_idx] + byte_off, kTmemStartColOfSFA1 + col);
                         }
 #    pragma unroll
@@ -405,11 +448,55 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         // drops the instruction rather than multiplying by a
                         // zeroed A1, so the benchmark measures the real cost of
                         // the second pass and not just its numerical effect.
-                        if constexpr (kEnableResidualPass)
+                        // Under the split pipeline the residual pass issues in
+                        // the second phase below instead.
+                        if constexpr (kEnableResidualPass and not kSplitTransform)
                             issue_pass(a, a1_base_lo, kTmemStartColOfSFA1, true);
                     }
                 }
                 __syncwarp();
+
+                // Split pipeline, phase 2: wait for the residual quantization
+                // and issue the A1 passes on top of the same accumulator.
+                if constexpr (kSplitTransform and kEnableResidualPass)
+                {
+                    transform_full_barriers[stage_idx]->wait(phase);
+                    ptx::tcgen05_after_thread_sync();
+                    if (cute::elect_one_sync())
+                    {
+                        auto utccp_sf = [&](uint8_t* smem_ptr, const uint32_t& tmem_col) {
+                            mma::sm100::replace_smem_desc_addr(sf_desc, smem_ptr);
+                            cute::SM100_UTCCP_4x32dp128bit_1cta::copy(sf_desc, tmem_col);
+                        };
+                        auto issue_pass = [&](const uint32_t& a, const uint32_t& a_base_lo, const uint32_t& sfa_tmem_base) {
+                            auto desc_a = a0_desc;
+                            desc_a.lo   = mma::sm100::advance_packed_fp4_desc_lo(a_base_lo, a * UMMA_K);
+                            auto desc_b = b_desc;
+                            desc_b.lo   = mma::sm100::advance_packed_fp4_desc_lo(b_base_lo, a * UMMA_K);
+                            const auto runtime_desc =
+                                mma::sm100::make_runtime_instr_desc_with_sf_id(instr_desc, 0, 0);
+                            ptx::SM100_MMA_MXF4NVF4_SS::fma(
+                                desc_a,
+                                desc_b,
+                                accum_stage_idx * UMMA_N,
+                                true,
+                                runtime_desc,
+                                sfa_tmem_base + a * kNumSFASubAtoms * 4,
+                                kTmemStartColOfSFB + a * kNumSFBSubAtoms * 4);
+                        };
+#    pragma unroll
+                        for (uint32_t a = 0; a < kNumKAtoms; ++a)
+                        {
+#    pragma unroll
+                            for (uint32_t i = 0; i < kNumSFASubAtoms; ++i)
+                                utccp_sf(smem_sfa1[stage_idx] +
+                                             (a * kNumSFASubAtoms + i) * kNumUTCCPAlignedElems * 4,
+                                         kTmemStartColOfSFA1 + (a * kNumSFASubAtoms + i) * 4);
+                            issue_pass(a, a1_base_lo, kTmemStartColOfSFA1);
+                        }
+                    }
+                    __syncwarp();
+                }
 
                 cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(empty_barriers[stage_idx]));
                 if (k_block_idx == num_total_k_blocks - 1)
@@ -448,7 +535,10 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     transpose_atom(smem_sfb[stage_idx] + i * kNumUTCCPAlignedElems);
                 cutlass::arch::fence_view_async_shared();
 
-                transform_full_barriers[stage_idx]->arrive(0u);
+                if constexpr (kSplitTransform)
+                    a0_full_barriers[stage_idx]->arrive();
+                else
+                    transform_full_barriers[stage_idx]->arrive();
             }
         }
         // ==================================================================
@@ -462,29 +552,69 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
             const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
+            // Direct mode reads global A per tile; contiguous activations are
+            // one flat tensor, so the row is just the tile's m index.
+            const uint32_t tile_m_idx = m_block_idx * BLOCK_M;
+
             for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
             {
                 full_barriers[stage_idx]->wait(phase);
 
-                transform::transform_a_tile<
-                    BLOCK_M,
-                    BLOCK_K,
-                    kSwizzleAMode,
-                    kSwizzleABMode,
-                    kNumTransformThreads,
-                    kScalePolicy,
-                    kEnableResidualPass>(
-                    smem_a[stage_idx],
-                    smem_a0[stage_idx],
-                    smem_a1[stage_idx],
-                    smem_sfa0[stage_idx],
-                    smem_sfa1[stage_idx],
-                    transform_tid);
+                if constexpr (kSplitTransform and kEnableResidualPass and not kDirectGlobalA)
+                {
+                    transform::transform_a_tile_split<
+                        BLOCK_M,
+                        BLOCK_K,
+                        kSwizzleAMode,
+                        kSwizzleABMode,
+                        kNumTransformThreads,
+                        kScalePolicy>(
+                        smem_a[stage_idx],
+                        smem_a0[stage_idx],
+                        smem_a1[stage_idx],
+                        smem_sfa0[stage_idx],
+                        smem_sfa1[stage_idx],
+                        transform_tid,
+                        [&] {
+                            cutlass::arch::fence_view_async_shared();
+                            a0_full_barriers[stage_idx]->arrive();
+                        });
+                }
+                else if constexpr (kDirectGlobalA)
+                    transform::transform_a_tile_gmem<
+                        BLOCK_M,
+                        BLOCK_K,
+                        kSwizzleABMode,
+                        kNumTransformThreads,
+                        kScalePolicy,
+                        kEnableResidualPass>(
+                        a_gmem + static_cast<uint64_t>(tile_m_idx) * lda + k_block_idx * BLOCK_K,
+                        lda,
+                        smem_a0[stage_idx],
+                        smem_a1[stage_idx],
+                        smem_sfa0[stage_idx],
+                        smem_sfa1[stage_idx],
+                        transform_tid);
+                else
+                    transform::transform_a_tile<
+                        BLOCK_M,
+                        BLOCK_K,
+                        kSwizzleAMode,
+                        kSwizzleABMode,
+                        kNumTransformThreads,
+                        kScalePolicy,
+                        kEnableResidualPass>(
+                        smem_a[stage_idx],
+                        smem_a0[stage_idx],
+                        smem_a1[stage_idx],
+                        smem_sfa0[stage_idx],
+                        smem_sfa1[stage_idx],
+                        transform_tid);
 
                 // Make the FP4 tiles and scales visible to UTCCP/UMMA, which read
                 // shared memory through the async proxy.
                 cutlass::arch::fence_view_async_shared();
-                transform_full_barriers[stage_idx]->arrive(0u);
+                transform_full_barriers[stage_idx]->arrive();
             }
         }
         // ==================================================================
@@ -530,7 +660,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 kNumTMAStoreStages,
                 kNumUMMAStoreThreads,
                 kGemmType,
-                cd_dtype_t>(smem_cd, tma_stage_idx, accum_stage_idx * UMMA_N, base_m_idx, base_n_idx, scheduler.current_group_idx, global_scale, epilogue_warp_idx, lane_idx, tmem_empty_barriers[accum_stage_idx], tensor_map_cd);
+                cd_dtype_t>(smem_cd, tma_stage_idx, accum_stage_idx * UMMA_N, base_m_idx, base_n_idx, scheduler.current_group_idx, global_scale, epilogue_warp_idx, static_cast<uint32_t>(warp_idx) % 4u, lane_idx, tmem_empty_barriers[accum_stage_idx], tensor_map_cd);
         }
     }
 

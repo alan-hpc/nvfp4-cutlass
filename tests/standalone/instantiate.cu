@@ -26,6 +26,7 @@ static void __instantiate_default()
                                        /*kNumTransformWarps=*/8,
                                        /*kNumEpilogueThreads=*/128,
                                        /*kNumSMs=*/148,
+                                       /*kNumForcedEpilogueStages=*/0,
                                        GemmType::MGroupedContiguous,
                                        transform::ScalePolicy::DerivedDiv8,
                                        /*kEnableResidualPass=*/true>);
@@ -50,6 +51,7 @@ static void __instantiate_small_n()
                                        8,
                                        128,
                                        148,
+                                       /*kNumForcedEpilogueStages=*/0,
                                        GemmType::MGroupedContiguous,
                                        transform::ScalePolicy::ResidualAmax,
                                        /*kEnableResidualPass=*/true>);
@@ -73,6 +75,7 @@ static void __instantiate_single_pass()
                                        8,
                                        128,
                                        148,
+                                       /*kNumForcedEpilogueStages=*/0,
                                        GemmType::MGroupedContiguous,
                                        transform::ScalePolicy::DerivedDiv8,
                                        /*kEnableResidualPass=*/false>);

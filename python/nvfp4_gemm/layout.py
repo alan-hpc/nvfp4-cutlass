@@ -152,15 +152,18 @@ def dequantize_weight_nvfp4(b: torch.Tensor, sfb: torch.Tensor, gw: torch.Tensor
     return values * scales * gw.reshape(-1, 1, 1).to(torch.float32)
 
 
-def make_m_indices(group_sizes: list[int] | torch.Tensor, device=None) -> torch.Tensor:
+def make_m_indices(group_sizes: list[int] | torch.Tensor, device=None,
+                   alignment: int = 128) -> torch.Tensor:
     """Expert index per row, for the m-grouped contiguous layout.
 
-    The kernel reads ``m_indices[m_block_idx * 128]``, so each expert's row range
-    must start on a 128-row boundary.
+    The kernel reads ``m_indices[m_block_idx * alignment]``, so each expert's
+    row range must start on an alignment boundary: 128 rows for the normal
+    orientation, 32 for the swap-AB kernel (``tune_swap_ab=1``), whose token
+    tiles are that much finer.
     """
     sizes = torch.as_tensor(group_sizes, dtype=torch.int64).tolist()
     for i, size in enumerate(sizes):
-        if size % 128 != 0:
-            raise ValueError(f"group {i} has {size} rows; each must be a multiple of 128")
+        if size % alignment != 0:
+            raise ValueError(f"group {i} has {size} rows; each must be a multiple of {alignment}")
     out = torch.cat([torch.full((size,), e, dtype=torch.int32) for e, size in enumerate(sizes)])
     return out.to(device) if device is not None else out

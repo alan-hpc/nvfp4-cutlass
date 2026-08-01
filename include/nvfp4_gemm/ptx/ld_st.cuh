@@ -39,6 +39,26 @@ CUTLASS_DEVICE void st_shared(const uint32_t* ptr, uint32_t val)
     asm volatile("st.shared.u32 [%0], %1;" ::"l"(ptr), "r"(val));
 }
 
+/// Half-word store, for writers that own only part of a 4-byte SF atom word.
+CUTLASS_DEVICE void st_shared(const uint16_t* ptr, uint16_t val)
+{
+    asm volatile("st.shared.u16 [%0], %1;" ::"l"(ptr), "h"(val));
+}
+
+/// Transposed 8x8 BF16 matrix store, for the swap-AB epilogue: lanes hold
+/// accumulator columns (tokens) and `stmatrix.trans` lands them as rows.
+struct SM90_U32x4_STSM_T
+{
+    CUTLASS_DEVICE static void copy(uint32_t src_0, uint32_t src_1, uint32_t src_2, uint32_t src_3, void* smem_dst)
+    {
+        asm volatile("stmatrix.sync.aligned.x4.m8n8.shared.b16.trans [%0], {%1, %2, %3, %4};\n" ::"l"(__cvta_generic_to_shared(smem_dst)),
+                     "r"(src_0),
+                     "r"(src_1),
+                     "r"(src_2),
+                     "r"(src_3));
+    }
+};
+
 CUTLASS_DEVICE void st_shared(const void* ptr, uint32_t x, uint32_t y, uint32_t z, uint32_t w)
 {
     asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(ptr), "r"(x), "r"(y), "r"(z), "r"(w));

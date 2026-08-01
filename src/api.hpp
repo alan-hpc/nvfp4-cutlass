@@ -30,7 +30,21 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
                                                       const torch::Tensor& d,
                                                       const torch::Tensor& m_indices,
                                                       const std::string&   scale_policy,
-                                                      bool                 enable_residual_pass)
+                                                      bool                 enable_residual_pass,
+                                                      int                  tune_block_n,
+                                                      int                  tune_transform_warps,
+                                                      int                  tune_epilogue_threads,
+                                                      int                  tune_num_stages,
+                                                      int                  tune_swizzle_cd,
+                                                      int                  tune_block_k,
+                                                      int                  tune_epilogue_stages,
+                                                      int                  tune_swap_ab,
+                                                      int                  tune_cluster,
+                                                      int                  tune_direct_a,
+                                                      int                  tune_l2_pin_weights,
+                                                      int                  tune_no_pdl,
+                                                      int                  tune_sched_group,
+                                                      int                  tune_split_transform)
 {
     const int m          = static_cast<int>(a.size(0));
     const int k          = static_cast<int>(a.size(1));
@@ -55,17 +69,42 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
     // The scale-atom addressing assumes whole 128-row / 64-element atoms, and
     // TMA fills only BLOCK_N of the padded SF rows UTCCP later reads.
     NVFP4_HOST_ASSERT_MSG(k % 128 == 0 and n % 128 == 0, "N and K must be multiples of 128");
-    // The transform covers a full 128-row tile; a ragged tail would leave part
-    // of A0/A1 undefined for rows UMMA still reads.
-    NVFP4_HOST_ASSERT_MSG(m % 128 == 0, "M must be a multiple of 128");
+    // Normal orientation: the transform covers a full 128-row tile.  Swap-AB
+    // puts tokens on the N side, so groups only need block_t (32) alignment.
+    NVFP4_HOST_ASSERT_MSG(m % (tune_swap_ab ? 32 : 128) == 0,
+                          "M must be a multiple of the token-tile alignment");
 
     if (m == 0 or n == 0)
         return;
 
-    NVFP4_HOST_ASSERT_MSG(scale_policy == "derived_div8" or scale_policy == "residual_amax",
-                          "scale_policy must be 'derived_div8' or 'residual_amax'");
-    const std::string policy =
-        scale_policy == "residual_amax" ? "ScalePolicy::ResidualAmax" : "ScalePolicy::DerivedDiv8";
+    if (tune_swap_ab)
+    {
+        sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous_swap_ab(
+            a,
+            b,
+            sfb,
+            gw,
+            d,
+            m_indices,
+            num_groups,
+            m,
+            n,
+            k,
+            scale_policy,
+            enable_residual_pass,
+            /*tune_block_t=*/tune_block_n,
+            tune_transform_warps,
+            tune_num_stages,
+            tune_block_k);
+        return;
+    }
+
+    NVFP4_HOST_ASSERT_MSG(scale_policy == "derived_div8" or scale_policy == "residual_amax" or
+                              scale_policy == "derived_div4",
+                          "scale_policy must be 'derived_div8', 'derived_div4' or 'residual_amax'");
+    const std::string policy = scale_policy == "residual_amax" ? "ScalePolicy::ResidualAmax"
+                               : scale_policy == "derived_div4" ? "ScalePolicy::DerivedDiv4"
+                                                                : "ScalePolicy::DerivedDiv8";
 
     sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
         a,
@@ -79,7 +118,20 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
         n,
         k,
         policy,
-        enable_residual_pass);
+        enable_residual_pass,
+        tune_block_n,
+        tune_transform_warps,
+        tune_epilogue_threads,
+        tune_num_stages,
+        tune_swizzle_cd,
+        tune_block_k,
+        tune_epilogue_stages,
+        tune_cluster,
+        tune_direct_a,
+        tune_l2_pin_weights,
+        tune_no_pdl,
+        tune_sched_group,
+        tune_split_transform);
 }
 
 inline void register_apis(pybind11::module_& m)
@@ -101,7 +153,34 @@ inline void register_apis(pybind11::module_& m)
           // Single-pass mode drops the residual MMA entirely; it exists so the
           // benchmark can isolate what the second pass costs against a kernel
           // that is otherwise identical.
-          pybind11::arg("enable_residual_pass") = true);
+          pybind11::arg("enable_residual_pass") = true,
+          // Tuning overrides. Zero means "leave the shipped default alone", so
+          // an autotuner can vary one axis at a time without restating the rest.
+          pybind11::arg("tune_block_n")           = 0,
+          pybind11::arg("tune_transform_warps")   = 0,
+          pybind11::arg("tune_epilogue_threads")  = 0,
+          pybind11::arg("tune_num_stages")        = 0,
+          pybind11::arg("tune_swizzle_cd")        = 0,
+          pybind11::arg("tune_block_k")           = 0,
+          pybind11::arg("tune_epilogue_stages")   = 0,
+          // Swap-AB: weights on the 128-row M side, tokens on the N side.
+          // For decode-sized batches; m_indices groups need only 32-row
+          // alignment. tune_block_n doubles as the token tile (32/64/128).
+          pybind11::arg("tune_swap_ab")           = 0,
+          // Cluster co-scheduling (no multicast yet): pairs of consecutive
+          // tiles share a W tile, so 2 lands them in one GPC for L2 locality.
+          pybind11::arg("tune_cluster")           = 0,
+          // Direct-global-A: the transform reads BF16 activations via LDG
+          // instead of a TMA->SMEM round trip -- removes 32 KB/k-block of TMA
+          // ingress, the measured prefill floor.
+          pybind11::arg("tune_direct_a")          = 0,
+          pybind11::arg("tune_l2_pin_weights")    = 0,
+          pybind11::arg("tune_no_pdl")            = 0,
+          pybind11::arg("tune_sched_group")       = 0,
+          // Split transform: signal A0/SFA0 readiness before the residual
+          // quantization, so MMA pass 0 overlaps the residual pass (the
+          // algorithm doc's fine-grained pipeline).
+          pybind11::arg("tune_split_transform")   = 0);
 }
 
 }   // namespace nvfp4_gemm::api

@@ -20,6 +20,12 @@ struct LaunchConfig
     int  num_threads = 128;
     int  smem_size   = 0;
     bool enable_pdl  = true;
+    /// 1 = no clustering. 2 pairs CTAs so a TMA multicast can deliver one A
+    /// tile into both CTAs' shared memory with a single L2 read.
+    int cluster_dim = 1;
+    /// Pin this window (the weights) as L2-persisting for the launch.
+    void*  l2_window_ptr   = nullptr;
+    size_t l2_window_bytes = 0;
 };
 
 /// Launch a JIT-compiled kernel on the current stream.
@@ -38,6 +44,22 @@ void launch(const KernelPtr& kernel, const LaunchConfig& config, Ts&... args)
 
     void* arg_ptrs[] = {static_cast<void*>(&args)...};
 
+    const auto stream = static_cast<CUstream>(at::cuda::getCurrentCUDAStream().stream());
+    if (config.l2_window_ptr != nullptr)
+    {
+        // Persisting hints need a carve-out first, and the window rides on the
+        // stream. (Not captured by CUDA graphs -- callers measuring this must
+        // launch eagerly.)
+        cuCtxSetLimit(CU_LIMIT_PERSISTING_L2_CACHE_SIZE, config.l2_window_bytes);
+        CUstreamAttrValue val{};
+        val.accessPolicyWindow.base_ptr  = config.l2_window_ptr;
+        val.accessPolicyWindow.num_bytes = config.l2_window_bytes;
+        val.accessPolicyWindow.hitRatio  = 1.0f;
+        val.accessPolicyWindow.hitProp   = CU_ACCESS_PROPERTY_PERSISTING;
+        val.accessPolicyWindow.missProp  = CU_ACCESS_PROPERTY_STREAMING;
+        cuStreamSetAttribute(stream, CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW, &val);
+    }
+
     CUlaunchConfig launch_config{};
     launch_config.gridDimX       = static_cast<unsigned>(config.grid_dim);
     launch_config.gridDimY       = 1;
@@ -46,19 +68,29 @@ void launch(const KernelPtr& kernel, const LaunchConfig& config, Ts&... args)
     launch_config.blockDimY      = 1;
     launch_config.blockDimZ      = 1;
     launch_config.sharedMemBytes = static_cast<unsigned>(config.smem_size);
-    launch_config.hStream        = static_cast<CUstream>(at::cuda::getCurrentCUDAStream().stream());
+    launch_config.hStream        = stream;
 
     // Programmatic dependent launch lets the next kernel start its prologue
     // while this one drains; the kernel's `cudaGridDependencySynchronize()` is
     // what makes that safe.
-    CUlaunchAttribute attributes[1];
+    CUlaunchAttribute attributes[2];
+    launch_config.attrs    = attributes;
     launch_config.numAttrs = 0;
     if (config.enable_pdl)
     {
-        attributes[0].id                                           = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
-        attributes[0].value.programmaticStreamSerializationAllowed = 1;
-        launch_config.attrs                                        = attributes;
-        launch_config.numAttrs                                     = 1;
+        attributes[launch_config.numAttrs].id                                           = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+        attributes[launch_config.numAttrs].value.programmaticStreamSerializationAllowed = 1;
+        ++launch_config.numAttrs;
+    }
+    if (config.cluster_dim > 1)
+    {
+        NVFP4_HOST_ASSERT_MSG(config.grid_dim % config.cluster_dim == 0,
+                              "grid must be a multiple of the cluster size");
+        attributes[launch_config.numAttrs].id                       = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+        attributes[launch_config.numAttrs].value.clusterDim.x       = static_cast<unsigned>(config.cluster_dim);
+        attributes[launch_config.numAttrs].value.clusterDim.y       = 1;
+        attributes[launch_config.numAttrs].value.clusterDim.z       = 1;
+        ++launch_config.numAttrs;
     }
 
     NVFP4_CU_CHECK(cuLaunchKernelEx(&launch_config, kernel->function, arg_ptrs, nullptr));

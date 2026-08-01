@@ -25,7 +25,7 @@ using utils::PatternVisitor;
 /// term vanishes at compile time.
 template<uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t STORE_BLOCK_M, uint32_t STORE_BLOCK_N, uint32_t kSwizzleCDMode, uint32_t kNumTMAStoreStages, uint32_t kNumUMMAStoreThreads, GemmType kGemmType, typename cd_dtype_t, typename pattern_cd_t>
 CUTLASS_DEVICE void
-sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma_stage_idx, const uint32_t& tmem_base_addr, const uint32_t& base_m_idx, const uint32_t& base_n_idx, const uint32_t& batch_idx, const float& global_scale, const uint32_t& epilogue_warp_idx, const uint32_t& lane_idx, const cutlass::arch::ClusterTransactionBarrier* tmem_empty_barrier, const cute::TmaDescriptor& tensor_map_cd)
+sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma_stage_idx, const uint32_t& tmem_base_addr, const uint32_t& base_m_idx, const uint32_t& base_n_idx, const uint32_t& batch_idx, const float& global_scale, const uint32_t& epilogue_warp_idx, const uint32_t& subpartition_idx, const uint32_t& lane_idx, const cutlass::arch::ClusterTransactionBarrier* tmem_empty_barrier, const cute::TmaDescriptor& tensor_map_cd)
 {
     constexpr uint32_t kNumBankGroupBytes    = 16;
     constexpr uint32_t kNumElemsPerBankGroup = kNumBankGroupBytes / sizeof(cd_dtype_t);
@@ -57,8 +57,44 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
             const auto m_idx = base_m_idx + w * STORE_BLOCK_M;
             const auto n_idx = base_n_idx + s * STORE_BLOCK_N;
 
+            // Issue every bank group's TMEM load up front and wait once.
+            // `tcgen05.wait::ld` waits for *all* outstanding loads of the warp,
+            // so a per-group fence would serialize kNumBankGroups full TMEM
+            // round trips where a single one covers them all -- ncu shows that
+            // serialization as the kernel's dominant stall (long_scoreboard,
+            // ~45% of issue latency).  The register cost (kNumBankGroups x 8
+            // u32) is what the launch bounds leave room for.
+            constexpr uint32_t kNumBankGroups = STORE_BLOCK_N / kNumElemsPerBankGroup;
+            NVFP4_STATIC_ASSERT(kNumElemsPerBankGroup == 8, "Invalid type");
+            uint32_t values[kNumBankGroups][kNumElemsPerBankGroup];
 #pragma unroll
-            for (uint32_t i = 0; i < STORE_BLOCK_N / kNumElemsPerBankGroup; ++i)
+            for (uint32_t i = 0; i < kNumBankGroups; ++i)
+            {
+                const uint32_t tmem_addr = tmem_base_addr + w * BLOCK_N +
+                                           s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;
+                cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
+                                                      values[i][0],
+                                                      values[i][1],
+                                                      values[i][2],
+                                                      values[i][3],
+                                                      values[i][4],
+                                                      values[i][5],
+                                                      values[i][6],
+                                                      values[i][7]);
+            }
+            cutlass::arch::fence_view_async_tmem_load();
+
+            // The accumulator now lives in registers: release it before the
+            // pack/store half, not after, so the MMA warp can start the next
+            // tile while this store still drains.
+            if (w == kNumMWaves - 1 and s == kNumStores - 1)
+            {
+                ptx::tcgen05_before_thread_sync();
+                tmem_empty_barrier->arrive();
+            }
+
+#pragma unroll
+            for (uint32_t i = 0; i < kNumBankGroups; ++i)
             {
                 auto           bank_group_index = i + lane_idx * (kSwizzleCDMode / kNumBankGroupBytes);
                 constexpr bool kHasShortcut     = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
@@ -66,30 +102,22 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
                 auto           col              = kHasShortcut ? (i) : (bank_group_index % 8);
                 col ^= row % (kSwizzleCDMode / 16);
 
-                uint32_t tmem_addr = tmem_base_addr + w * BLOCK_N +
-                                     s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;
-                auto     smem_ptr  = smem_base_ptr +
-                                     epilogue_warp_idx * 32 * kSwizzleCDMode +
-                                     row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
-
-                uint32_t values[kNumElemsPerBankGroup];
-                NVFP4_STATIC_ASSERT(kNumElemsPerBankGroup == 8, "Invalid type");
-                cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
-                                                      values[0],
-                                                      values[1],
-                                                      values[2],
-                                                      values[3],
-                                                      values[4],
-                                                      values[5],
-                                                      values[6],
-                                                      values[7]);
-                cutlass::arch::fence_view_async_tmem_load();
+                // `tcgen05.ld` takes its 32-lane TMEM sub-partition from the
+                // warp's *absolute* index mod 4, not from its rank among the
+                // epilogue warps.  Those two agree only when the epilogue
+                // happens to start on a multiple-of-4 warp, so the destination
+                // row block has to follow the sub-partition the hardware picked
+                // -- otherwise the accumulator comes out rotated by whole
+                // 32-row blocks.
+                auto smem_ptr = smem_base_ptr +
+                                subpartition_idx * 32 * kSwizzleCDMode +
+                                row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
 
                 // Apply G_W in FP32, then pack pairs into BF16.
                 float scaled[kNumElemsPerBankGroup];
 #pragma unroll
                 for (uint32_t j = 0; j < kNumElemsPerBankGroup; ++j)
-                    scaled[j] = *reinterpret_cast<float*>(&values[j]) * global_scale;
+                    scaled[j] = *reinterpret_cast<float*>(&values[i][j]) * global_scale;
 
                 ptx::st_shared(
                     smem_ptr,
@@ -97,14 +125,6 @@ sm100_store_cd_gscale(const PatternVisitor<pattern_cd_t>& smem_cd, uint32_t& tma
                     math::cast_into_bf16_and_pack(scaled[2], scaled[3]),
                     math::cast_into_bf16_and_pack(scaled[4], scaled[5]),
                     math::cast_into_bf16_and_pack(scaled[6], scaled[7]));
-            }
-
-            // Release the accumulator as early as possible so the MMA warp can
-            // start the next block while this store drains.
-            if (w == kNumMWaves - 1 and s == kNumStores - 1)
-            {
-                ptx::tcgen05_before_thread_sync();
-                tmem_empty_barrier->arrive(0u);
             }
 
             cute::tma_store_fence();
