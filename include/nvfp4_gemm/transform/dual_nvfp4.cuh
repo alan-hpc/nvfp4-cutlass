@@ -232,11 +232,21 @@ CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
                                            uint32_t& s0_code,
                                            uint32_t& s1_code)
 {
-    // 1: block amax on packed pairs; the two halves merge with one byte swap.
-    __nv_bfloat162 m = __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[0]));
+    // 1: block amax on packed pairs, as a TREE -- max is exact under any
+    // association, and the linear chain was 7 serial VHMNMX deep on the
+    // per-kb latency path (the transform's exposed cost is chain depth, not
+    // throughput: tw8 == tw16 measured).  Depth drops to 3.
+    __nv_bfloat162 t[kBlockSize / 4];
 #pragma unroll
-    for (uint32_t i = 1; i < kBlockSize / 2; ++i)
-        m = __hmax2(m, __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[i])));
+    for (uint32_t i = 0; i < kBlockSize / 4; ++i)
+        t[i] = __hmax2(__habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[2 * i])),
+                       __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[2 * i + 1])));
+#pragma unroll
+    for (uint32_t stride = kBlockSize / 8; stride > 0; stride /= 2)
+#pragma unroll
+        for (uint32_t i = 0; i < stride; ++i)
+            t[i] = __hmax2(t[i], t[i + stride]);
+    const __nv_bfloat162 m     = t[0];
     const uint32_t       mswap = __byte_perm(*reinterpret_cast<const uint32_t*>(&m), 0, 0x1032);
     const __nv_bfloat162 mboth = __hmax2(m, *reinterpret_cast<const __nv_bfloat162*>(&mswap));
     const float          amax  = __bfloat162float(mboth.x);

@@ -716,7 +716,32 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const auto accum_phase_idx = (scheduler.current_iter / kNumEpilogueStages) & 1;
 
             const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
-            tmem_full_barriers[accum_stage_idx]->wait(accum_phase_idx);
+            if constexpr (kTimingProbe == 5)
+            {
+                // Fake-helper probe (results CORRECT): burn a transform-shaped
+                // op stream (emulated bf16x2 mul + E2M1 cvt round trip, the
+                // same FMA/CVT pipe mix as the hot loop) while polling.  If
+                // this alone slows the kernel, the SM has no spare issue
+                // capacity during transform bursts and work-stealing is dead.
+                uint32_t sink = threadIdx.x | 0x3c003c00u;
+                while (not tmem_full_barriers[accum_stage_idx]->try_wait(accum_phase_idx))
+                {
+#    pragma unroll
+                    for (int burn = 0; burn < 32; ++burn)
+                    {
+                        __nv_bfloat162 x = *reinterpret_cast<__nv_bfloat162*>(&sink);
+                        x                = __hmul2(x, x);
+                        x                = __hsub2(x, __float2bfloat162_rn(0.25f));
+                        sink ^= ptx::cvt_e2m1x2_bf16x2(*reinterpret_cast<uint32_t*>(&x));
+                        sink += ptx::cvt_bf16x2_e2m1x2(sink & 0xffu);
+                        sink |= 0x3c003c00u;
+                    }
+                }
+                if (sink == 0xdeadbeefu)
+                    __trap();
+            }
+            else
+                tmem_full_barriers[accum_stage_idx]->wait(accum_phase_idx);
             const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
             ptx::tcgen05_after_thread_sync();
 

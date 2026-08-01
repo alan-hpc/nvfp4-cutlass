@@ -816,6 +816,24 @@
   <b>epilogue warp 动态偷 transform slot</b>(4 warp 每 tile 空等 12.5 µs,
   +25% transform 带宽的机会),对抗评审进行中。</p>
 
+  <h3>协作攻坚 · R31 work-stealing 判死 + 树形 amax 落地(2026-08-02 凌晨)</h3>
+  <p><strong>对抗评审(三路)否决了 epilogue-warp 偷 transform slot 的带宽路线</strong>:
+  ① 实测 tw8==tw16 已证静态带宽翻倍无效——transform 暴露成本是每 kb 的依赖链延迟,
+  不是吞吐;② w16 默认下每线程恰好 1 个 slot,相位已是「单 slot 链深」——工人再多
+  也无法缩短;③ 完整实现还需 epoch-CAS 票据堵两个静默腐败竞态。评审给的 Stage-0
+  30 行探针(<code>tune_timing_probe=5</code>:epilogue warp 等待时燃烧 transform 同款
+  FMA/CVT 指令流,结果正确)实测<b>完全无感</b>(8k gu 51.31 vs 51.27)——发射口有
+  余量但无工可派,<b>路线以 30 行探针的代价替代整套队列工程后归档死亡</b>。</p>
+  <p><strong>真杠杆第一刀:amax 线性链 → 树形归约</strong>(max 结合律精确,逐位等价):
+  链深 7→3,8k gu 51.56→<b>51.27</b>、16k 66.10→<b>65.68</b>,down/2k 持平,
+  正确性 0.999921/0.999958 逐位不变。</p>
+  <blockquote><strong>R31 定论(单核 prefill 的最终结构图景)</strong>:transform-free
+  上界(R30)的 +12.6 µs = 每 kb 暴露 ~0.26 µs 的<b>依赖链延迟</b>
+  (LDS→amax→s0 编解码→rcp→两遍量化→屏障唤醒),对 warp 数、发射口、带宽全部不敏感;
+  剩余优化 = 继续削链(每刀几十 ns:双 block 显式交错、s0 链缩短、屏障唤醒),
+  收益尺度 ~0.2-1 µs/点。fused 单核设计在此约束下已近结构地板:
+  decode 全反超、prefill down 平价、8k gu 差距的大头是 wave-ceil 运气(R29)。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
