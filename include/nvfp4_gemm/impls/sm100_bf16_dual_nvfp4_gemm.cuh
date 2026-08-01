@@ -42,7 +42,7 @@ using transform::ScalePolicy;
 /// scheduler keeps that overlap, which is what `kNumEpilogueStages == 2` buys.
 /// Whether the thread saving or the overlap wins is shape-dependent and has to
 /// be settled by measurement on hardware.
-template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, uint32_t kNumForcedEpilogueStages, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass, bool kDirectGlobalA = false, uint32_t kNumBlocksPerGroup = 0, bool kSplitTransform = false, uint32_t kTimingProbe = 0, uint32_t kTailSplit = 0>
+template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, uint32_t kNumForcedEpilogueStages, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass, bool kDirectGlobalA = false, uint32_t kNumBlocksPerGroup = 0, bool kSplitTransform = false, uint32_t kTimingProbe = 0, uint32_t kTailSplit = 0, uint32_t kNumShallowStages = 0, uint32_t kNumProducedStages = 0>
 CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilogueThreads, 1)
     sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                                     const float* __restrict__ weight_global_scales,
@@ -104,6 +104,25 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                                                        : kNumDerivedEpilogueStages;
     NVFP4_STATIC_ASSERT(kNumEpilogueStages <= kNumDerivedEpilogueStages,
                         "Forced epilogue stages exceed the tensor memory budget");
+    // Per-buffer pipeline depth (R35): buffers whose tenants release early
+    // (A via transform_full, A0/A1/SFA via the UMMA-read commit) may run
+    // SHALLOWER than the logical stage count, buying logical depth from the
+    // SMEM budget.  0 means uniform (today's layout, byte-identical).  B and
+    // SFB must stay at full depth: both release via the same
+    // umma_arrive(empty) at read completion, so a shallow SFB would rebuild
+    // the exact empty->tx->full loop the depth exists to divide.
+    constexpr uint32_t kShallowStages = kNumShallowStages == 0 ? kNumStages : kNumShallowStages;
+    // The transform's products live even shorter than A (write ~mid-transform
+    // to UMMA-read completion), so A0/A1/SFA0/SFA1 get their own, smaller
+    // depth -- which is what buys back the double-buffered cd64 epilogue.
+    constexpr uint32_t kProducedStages = kNumProducedStages == 0 ? kShallowStages : kNumProducedStages;
+    NVFP4_STATIC_ASSERT(kShallowStages >= 1 and kShallowStages <= kNumStages,
+                        "Shallow depth must not exceed the logical stage count");
+    NVFP4_STATIC_ASSERT(kProducedStages >= 1 and kProducedStages <= kShallowStages,
+                        "Produced depth must not exceed the shallow depth");
+    NVFP4_STATIC_ASSERT(kShallowStages == kNumStages or
+                            (not kSplitTransform and kTailSplit == 0 and not kDirectGlobalA),
+                        "Per-buffer depths exclude split/tail-split/direct-A in v1");
     constexpr uint32_t kNumTMAStoreStages   = 2;
     constexpr uint32_t STORE_BLOCK_M        = cute::min<uint32_t>(BLOCK_M, LAYOUT_AD_M);
     constexpr uint32_t STORE_BLOCK_N        = kSwizzleCDMode / sizeof(cd_dtype_t);
@@ -187,12 +206,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         return reinterpret_cast<cd_dtype_t*>(smem_buffer + i * SMEM_CD_SIZE_PER_STAGE);
     });
     constexpr uint32_t kOffsetA        = SMEM_CD_SIZE;
-    constexpr uint32_t kOffsetA0       = kOffsetA + kNumStages * SMEM_A_SIZE_PER_STAGE;
-    constexpr uint32_t kOffsetA1       = kOffsetA0 + kNumStages * SMEM_A0_SIZE_PER_STAGE;
-    constexpr uint32_t kOffsetB        = kOffsetA1 + kNumStages * SMEM_A0_SIZE_PER_STAGE;
+    constexpr uint32_t kOffsetA0       = kOffsetA + kShallowStages * SMEM_A_SIZE_PER_STAGE;
+    constexpr uint32_t kOffsetA1       = kOffsetA0 + kProducedStages * SMEM_A0_SIZE_PER_STAGE;
+    constexpr uint32_t kOffsetB        = kOffsetA1 + kProducedStages * SMEM_A0_SIZE_PER_STAGE;
     constexpr uint32_t kOffsetSFA0     = kOffsetB + kNumStages * SMEM_B_SIZE_PER_STAGE;
-    constexpr uint32_t kOffsetSFA1     = kOffsetSFA0 + kNumStages * SMEM_SFA_SIZE_PER_STAGE;
-    constexpr uint32_t kOffsetSFB      = kOffsetSFA1 + kNumStages * SMEM_SFA_SIZE_PER_STAGE;
+    constexpr uint32_t kOffsetSFA1     = kOffsetSFA0 + kProducedStages * SMEM_SFA_SIZE_PER_STAGE;
+    constexpr uint32_t kOffsetSFB      = kOffsetSFA1 + kProducedStages * SMEM_SFA_SIZE_PER_STAGE;
     constexpr uint32_t kOffsetBarriers = kOffsetSFB + kNumStages * SMEM_SFB_SIZE_PER_STAGE;
 
     auto smem_a    = utils::PatternVisitor([&](const uint32_t& i) {
@@ -281,10 +300,27 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         math::ceil_div(shape_k, BLOCK_K));
 
     uint32_t stage_idx = 0, phase = 0;
+    // Shallow-slot cursor (logical t mod kShallowStages) plus a shadow of the
+    // (stage, parity) cursor running kShallowStages behind, for the recycle
+    // waits.  The shadow's init is logical t - kShallowStages, so its waits
+    // fall through for the first kShallowStages iterations by the same
+    // init-parity trick the empty wait's `phase ^ 1` prologue uses.  NOTE:
+    // slot_sh is t mod kShallowStages, NOT stage_idx mod kShallowStages --
+    // the latter repeats slot 0 across the wrap and corrupts a live tenant.
+    uint32_t slot_sh  = 0;
+    uint32_t stage_sh = kNumStages - kShallowStages, phase_sh = 1;
+    uint32_t slot_pr  = 0;
+    uint32_t stage_pr = kNumStages - kProducedStages, phase_pr = 1;
     auto     advance_pipeline = [&](uint32_t& k_block_idx) {
         ++k_block_idx;
         stage_idx = stage_idx == kNumStages - 1 ? 0 : stage_idx + 1;
         phase ^= stage_idx == 0;
+        slot_sh  = slot_sh == kShallowStages - 1 ? 0 : slot_sh + 1;
+        stage_sh = stage_sh == kNumStages - 1 ? 0 : stage_sh + 1;
+        phase_sh ^= stage_sh == 0;
+        slot_pr  = slot_pr == kProducedStages - 1 ? 0 : slot_pr + 1;
+        stage_pr = stage_pr == kNumStages - 1 ? 0 : stage_pr + 1;
+        phase_pr ^= stage_pr == 0;
     };
 
     // ==================================================================
@@ -316,6 +352,13 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             {
                 const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
                 empty_barriers[stage_idx]->wait(phase ^ 1);
+                if constexpr (kShallowStages != kNumStages)
+                    // The A slot (t mod shallow) recycles from logical
+                    // t - shallow; its consumer releases via the FINAL
+                    // transform_full.  (Never a0_full: split mode re-reads
+                    // smem_a after arrive0 -- excluded in v1, documented so
+                    // it stays excluded.)  Shadow parity, no ^1.
+                    transform_full_barriers[stage_sh]->wait(phase_sh);
                 const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
 
                 const uint32_t k_idx = k_block_idx * BLOCK_K;
@@ -329,7 +372,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     tma::copy<BLOCK_K, BLOCK_M, kSwizzleAMode, __nv_bfloat16>(
                         &tensor_map_a,
                         full_barriers[stage_idx],
-                        smem_a[stage_idx],
+                        smem_a[slot_sh],
                         k_idx,
                         m_idx);
                 // W is packed E2M1 under `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B`,
@@ -404,8 +447,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
 
         // Stage selection by lane broadcast, as in DeepGEMM: lane `s` holds the
         // descriptor for stage `s`, and `exchange` picks it in one shuffle.
-        uint32_t a0_desc_lo = lane_idx < kNumStages ? a0_desc.lo + lane_idx * SMEM_A0_SIZE_PER_STAGE / 16 : 0u;
-        uint32_t a1_desc_lo = lane_idx < kNumStages ? a1_desc.lo + lane_idx * SMEM_A0_SIZE_PER_STAGE / 16 : 0u;
+        // A0/A1 tables span the SHALLOW slot count and are picked by the
+        // slot cursor below; a stage-indexed lane past the shallow count
+        // would point straight into A1's / B's regions.
+        uint32_t a0_desc_lo = lane_idx < kProducedStages ? a0_desc.lo + lane_idx * SMEM_A0_SIZE_PER_STAGE / 16 : 0u;
+        uint32_t a1_desc_lo = lane_idx < kProducedStages ? a1_desc.lo + lane_idx * SMEM_A0_SIZE_PER_STAGE / 16 : 0u;
         uint32_t b_desc_lo  = lane_idx < kNumStages ? b_desc.lo + lane_idx * SMEM_B_SIZE_PER_STAGE / 16 : 0u;
 
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
@@ -429,8 +475,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
                 ptx::tcgen05_after_thread_sync();
 
-                const auto a0_base_lo = ptx::exchange(a0_desc_lo, stage_idx);
-                const auto a1_base_lo = ptx::exchange(a1_desc_lo, stage_idx);
+                const auto a0_base_lo = ptx::exchange(a0_desc_lo, slot_pr);
+                const auto a1_base_lo = ptx::exchange(a1_desc_lo, slot_pr);
                 const auto b_base_lo  = ptx::exchange(b_desc_lo, stage_idx);
 
                 if (cute::elect_one_sync())
@@ -456,11 +502,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         {
                             const uint32_t byte_off = (a * kNumSFASubAtoms + i) * kNumUTCCPAlignedElems * 4;
                             const uint32_t col      = (a * kNumSFASubAtoms + i) * 4;
-                            utccp_sf(smem_sfa0[stage_idx] + byte_off, kTmemStartColOfSFA0 + col);
+                            utccp_sf(smem_sfa0[slot_pr] + byte_off, kTmemStartColOfSFA0 + col);
                             // kTimingProbe == 1 drops the SFA1 copies (WRONG
                             // RESULTS -- timing decomposition only).
                             if constexpr (kEnableResidualPass and not kSplitTransform and kTimingProbe != 1)
-                                utccp_sf(smem_sfa1[stage_idx] + byte_off, kTmemStartColOfSFA1 + col);
+                                utccp_sf(smem_sfa1[slot_pr] + byte_off, kTmemStartColOfSFA1 + col);
                         }
 #    pragma unroll
                         for (uint32_t i = 0; i < kNumSFBSubAtoms; ++i)
@@ -625,6 +671,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             {
                 const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
                 full_barriers[stage_idx]->wait(phase);
+                if constexpr (kProducedStages != kNumStages)
+                    // The A0/A1/SFA slot recycles from logical t - produced:
+                    // wait its UMMA reads (the empty commit covers UTCCP and
+                    // both MMA passes).  Fast-path in steady state.
+                    empty_barriers[stage_pr]->wait(phase_pr);
                 const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
 
                 if constexpr (kSplitTransform and kEnableResidualPass and not kDirectGlobalA)
@@ -675,11 +726,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         kNumTransformThreads,
                         kScalePolicy,
                         kEnableResidualPass>(
-                        smem_a[stage_idx],
-                        smem_a0[stage_idx],
-                        smem_a1[stage_idx],
-                        smem_sfa0[stage_idx],
-                        smem_sfa1[stage_idx],
+                        smem_a[slot_sh],
+                        smem_a0[slot_pr],
+                        smem_a1[slot_pr],
+                        smem_sfa0[slot_pr],
+                        smem_sfa1[slot_pr],
                         transform_tid);
 
                 // Make the FP4 tiles and scales visible to UTCCP/UMMA, which read

@@ -42,6 +42,8 @@ struct DualNVFP4Config
     int num_transform_warps  = 8;
     int num_epilogue_threads = 128;
     int num_stages           = 0;   // filled in by `compute_stages`
+    int num_shallow_stages   = 0;   // 0 = uniform; else A depth (R35)
+    int num_produced_stages  = 0;   // 0 = follows shallow; else A0/A1/SFA depth
     /// 0 = derive from the TMEM budget. Forcing 1 on a slim tile halves the
     /// TMEM footprint, which is what admits two CTAs per SM.
     int forced_epilogue_stages = 0;
@@ -57,15 +59,33 @@ struct DualNVFP4Config
     }
 
     /// Bytes of shared memory consumed by one mainloop stage.
-    int smem_per_stage() const
+    int shallow_stages() const { return num_shallow_stages > 0 ? num_shallow_stages : num_stages; }
+    int produced_stages() const { return num_produced_stages > 0 ? num_produced_stages : shallow_stages(); }
+
+    /// A + A0/A1 + SFA0/SFA1: released early (transform_full / UMMA-read
+    /// commit), so these may run shallower than the logical stage count.
+    int smem_shallow_stage() const { return block_m * block_k * 2; }   // A, BF16
+
+    int smem_produced_stage() const
     {
         const int sf_block_m = ((block_m + 127) / 128) * 128;
+        return 2 * (block_m * block_k / 2) +               // A0 + A1, packed FP4
+               2 * (sf_atoms_per_k() * sf_block_m * 4);    // SFA0 + SFA1
+    }
+
+    /// W + SFB: released by the same umma_arrive at read completion -- these
+    /// MUST stay at the full logical depth (a shallow SFB rebuilds the very
+    /// empty->tx->full loop the depth divides).
+    int smem_deep_stage() const
+    {
         const int sf_block_n = ((block_n + 127) / 128) * 128;
-        return block_m * block_k * 2 +                     // A, BF16
-               2 * (block_m * block_k / 2) +               // A0 + A1, packed FP4
-               block_n * block_k / 2 +                     // W, packed FP4
-               2 * (sf_atoms_per_k() * sf_block_m * 4) +   // SFA0 + SFA1
+        return block_n * block_k / 2 +                     // W, packed FP4
                sf_atoms_per_k() * sf_block_n * 4;          // SFB
+    }
+
+    int smem_per_stage() const
+    {
+        return smem_shallow_stage() + smem_produced_stage() + smem_deep_stage();
     }
 
     int smem_epilogue() const
@@ -92,7 +112,9 @@ struct DualNVFP4Config
 
     int smem_size() const
     {
-        return smem_epilogue() + num_stages * smem_per_stage() + smem_barriers();
+        return smem_epilogue() + num_stages * smem_deep_stage() +
+               shallow_stages() * smem_shallow_stage() +
+               produced_stages() * smem_produced_stage() + smem_barriers();
     }
 
     /// Pick the deepest pipeline that fits.
@@ -149,7 +171,7 @@ struct DualNVFP4Config
                               "not enough epilogue threads");
         // The epilogue stores 16 B bank groups: STORE_BLOCK_N = swizzle / 2
         // BF16 elements must hold whole groups and divide the tile width.
-        NVFP4_HOST_ASSERT_MSG((swizzle_cd_mode == 64 or swizzle_cd_mode == 128) and
+        NVFP4_HOST_ASSERT_MSG((swizzle_cd_mode == 32 or swizzle_cd_mode == 64 or swizzle_cd_mode == 128) and
                                   block_n % (swizzle_cd_mode / 2) == 0,
                               "swizzle_cd_mode must be 64 or 128 and divide the N tile");
         const int sf_cols = 2 * sf_atoms_per_k() * (((block_m + 127) / 128) * 4) +
@@ -227,7 +249,9 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
                                                             int                  tune_sched_group,
                                                             int                  tune_split_transform,
                                                             int                  tune_timing_probe,
-                                                            int                  tune_tail_split)
+                                                            int                  tune_tail_split,
+                                                            int                  tune_shallow_stages,
+                                                            int                  tune_produced_stages)
 {
     DualNVFP4Config config;
     if (tune_block_n > 0)
@@ -259,16 +283,34 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
                                 ((n + config.block_n - 1) / config.block_n);
     const bool multiwave = heuristic_tiles >= 2 * device_runtime->get_num_sms();
     if (tune_swizzle_cd == 0 and tune_transform_warps == 0 and tune_block_n == 0 and
-        tune_block_k == 0 and tune_num_stages == 0 and multiwave)
+        tune_block_k == 0 and tune_num_stages == 0 and tune_shallow_stages == 0 and
+        tune_produced_stages == 0 and multiwave)
     {
-        config.block_k             = 64;
-        config.swizzle_ab_mode     = 32;
-        // Sixteen warps at one block per thread (quarter-atom slots): the
-        // per-slot chain is the pacing recurrence at depth 6, so halving the
-        // per-thread block count buys 16k gate_up another 2 us.
-        config.num_transform_warps = 16;
-        config.swizzle_cd_mode     = 64;
-        // compute_stages' deepest-fit picks 6 for this geometry.
+        if (k >= 1024)
+        {
+            // Deep-K multi-wave: per-buffer depths (R35).  A lives to the
+            // transform's end (3 slots), the transform's products only to the
+            // UMMA-read commit (2 slots), and the freed SMEM buys a FOURTH
+            // logical stage at full-size k-blocks: the loop/depth law then
+            // meets the lower bk128 transform recurrence (8k gate_up
+            // 49.0 -> 47.5, 16k 62-65 -> 61.5 with the 16k jitter band gone).
+            config.swizzle_cd_mode     = 64;
+            config.num_transform_warps = 16;
+            config.num_shallow_stages  = 3;
+            config.num_produced_stages = 2;
+            // compute_stages' deepest-fit picks 4 for this geometry.
+        }
+        else
+        {
+            // Short-K multi-wave: the half-size k-block at depth 6 wins (the
+            // shallow config loses here -- only 4 k-blocks per tile).
+            config.block_k             = 64;
+            config.swizzle_ab_mode     = 32;
+            // Sixteen warps at one block per thread (quarter-atom slots).
+            config.num_transform_warps = 16;
+            config.swizzle_cd_mode     = 64;
+            // compute_stages' deepest-fit picks 6 for this geometry.
+        }
     }
     // Measured default for deep-K shapes (Qwen3.5-35B-A3B gate_up, N=1024
     // K=2048, B300): the 64 B CD swizzle admits a third mainloop stage and 16
@@ -282,6 +324,14 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
         config.num_transform_warps = 16;
     }
 
+    if (tune_shallow_stages > 0)
+    {
+        NVFP4_HOST_ASSERT_MSG(tune_split_transform == 0 and tune_direct_a == 0,
+                              "shallow stages exclude split-transform and direct-A");
+        config.num_shallow_stages = tune_shallow_stages;
+    }
+    if (tune_produced_stages > 0)
+        config.num_produced_stages = tune_produced_stages;
     config.compute_stages(tune_num_stages);
     config.validate();
 
@@ -295,7 +345,7 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     // changes scheduling, not tile geometry, and must never join that
     // conjunction.
     int tail_split = 0;
-    if (tune_tail_split > 1)
+    if (tune_tail_split > 1 and config.num_shallow_stages == 0)
     {
         const int tiles  = ((m + config.block_m - 1) / config.block_m) *
                           ((n + config.block_n - 1) / config.block_n);
@@ -369,7 +419,9 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
          << "        " << tune_sched_group << ",\n"
          << "        " << (tune_split_transform ? "true" : "false") << ",\n"
          << "        " << tune_timing_probe << ",\n"
-         << "        " << tail_split << ">);\n"
+         << "        " << tail_split << ",\n"
+         << "        " << config.num_shallow_stages << ",\n"
+         << "        " << config.num_produced_stages << ">);\n"
          << "    (void) ptr;\n}\n";
 
     // Distinct cache names per variant keep the two pass counts from colliding
