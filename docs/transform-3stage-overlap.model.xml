@@ -33,9 +33,9 @@
         <mxCell id="ax5" value="2085" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="1187" y="102" width="40" height="16" as="geometry" /></mxCell>
         <mxCell id="ax6" value="2502 ns" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="1391" y="102" width="50" height="16" as="geometry" /></mxCell>
 
-        <mxCell id="gp0" value="" style="line;strokeWidth=1;direction=north;strokeColor=#DDDDDD;" vertex="1" parent="1"><mxGeometry x="572" y="118" width="10" height="500" as="geometry" /></mxCell>
-        <mxCell id="gp1" value="" style="line;strokeWidth=1;direction=north;strokeColor=#DDDDDD;" vertex="1" parent="1"><mxGeometry x="989" y="118" width="10" height="500" as="geometry" /></mxCell>
-        <mxCell id="gp2" value="" style="line;strokeWidth=1;direction=north;strokeColor=#DDDDDD;" vertex="1" parent="1"><mxGeometry x="1406" y="118" width="10" height="500" as="geometry" /></mxCell>
+        <mxCell id="gp0" value="" style="rounded=0;fillColor=#DDDDDD;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="572" y="118" width="3" height="500" as="geometry" /></mxCell>
+        <mxCell id="gp1" value="" style="rounded=0;fillColor=#DDDDDD;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="989" y="118" width="3" height="500" as="geometry" /></mxCell>
+        <mxCell id="gp2" value="" style="rounded=0;fillColor=#DDDDDD;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="1406" y="118" width="3" height="500" as="geometry" /></mxCell>
 
         <mxCell id="lbs0" value="SMEM stage 0&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#888888&quot;&gt;kb X → X+3&lt;/font&gt;" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="126" width="135" height="48" as="geometry" /></mxCell>
         <mxCell id="bgs0" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="126" width="1290" height="48" as="geometry" /></mxCell>
@@ -96,7 +96,7 @@
         <mxCell id="r3f" value="★284★" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=10;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="1258" y="455" width="142" height="38" as="geometry" /></mxCell>
         <mxCell id="r3g" value="X+2…" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;opacity=60;fontSize=10" vertex="1" parent="1"><mxGeometry x="1400" y="455" width="50" height="38" as="geometry" /></mxCell>
 
-        <mxCell id="slice" value="" style="line;strokeWidth=3;direction=north;strokeColor=#FF8000;dashed=1;" vertex="1" parent="1"><mxGeometry x="305" y="118" width="10" height="400" as="geometry" /></mxCell>
+        <mxCell id="x_slice" value="" style="rounded=0;fillColor=#FF8000;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="305" y="118" width="3" height="400" as="geometry" /></mxCell>
         <mxCell id="slicel" value="切片 t=300ns:stage0 正被 transform(X)· stage1 已到货待命(X+1)· stage2 正被张量核消费(X−1)——&lt;b&gt;三 stage 三相,这就是重叠&lt;/b&gt;" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#D06000;align=left" vertex="1" parent="1"><mxGeometry x="160" y="520" width="1150" height="22" as="geometry" /></mxCell>
 
         <mxCell id="n1" value="&lt;b&gt;重叠机制(读图)&lt;/b&gt;:任意时刻,transform 在写一个 stage、张量核在读另一个 stage、第三个 stage 在 TMA 途中或已到货待命。资源视角(下半):transform warps 依次扫 stage 0→1→2→0…,每 kb 干 604ns 等 230ns;张量核每 834ns 执行 550ns,&lt;b&gt;每周期固定饿 284ns&lt;/b&gt;(红块)——这就是暴露链,唯一未被重叠吃掉的残差(R30:probe4 拿掉 transform 后红块消失,8k gu 51.6→38.9 µs)。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDFEFF;strokeColor=#B9C7E8;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">

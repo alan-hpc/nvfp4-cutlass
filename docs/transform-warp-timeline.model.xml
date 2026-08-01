@@ -84,13 +84,13 @@
 
         <mxCell id="ov" value="" style="rounded=1;fillColor=none;strokeColor=#7C4DFF;dashed=1;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="576" y="170" width="293" height="258" as="geometry" /></mxCell>
 
-        <mxCell id="ev0" value="" style="line;strokeWidth=2;direction=north;strokeColor=#2D7600;dashed=1;" vertex="1" parent="1"><mxGeometry x="155" y="104" width="10" height="392" as="geometry" /></mxCell>
+        <mxCell id="ev0" value="" style="rounded=0;fillColor=#2D7600;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="155" y="104" width="3" height="392" as="geometry" /></mxCell>
         <mxCell id="ev0l" value="full[s]:kb X 数据落地" style="text;html=1;fontSize=10;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="162" y="494" width="160" height="16" as="geometry" /></mxCell>
-        <mxCell id="ev1" value="" style="line;strokeWidth=2;direction=north;strokeColor=#9673A6;dashed=1;" vertex="1" parent="1"><mxGeometry x="590" y="104" width="10" height="392" as="geometry" /></mxCell>
+        <mxCell id="ev1" value="" style="rounded=0;fillColor=#9673A6;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="590" y="104" width="3" height="392" as="geometry" /></mxCell>
         <mxCell id="ev1l" value="transform_full[s] @435" style="text;html=1;fontSize=10;fontColor=#9673A6;fontStyle=1" vertex="1" parent="1"><mxGeometry x="470" y="494" width="150" height="16" as="geometry" /></mxCell>
-        <mxCell id="ev2" value="" style="line;strokeWidth=2;direction=north;strokeColor=#0050EF;dashed=1;" vertex="1" parent="1"><mxGeometry x="860" y="104" width="10" height="392" as="geometry" /></mxCell>
+        <mxCell id="ev2" value="" style="rounded=0;fillColor=#0050EF;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="860" y="104" width="3" height="392" as="geometry" /></mxCell>
         <mxCell id="ev2l" value="umma_arrive(empty[s]) @705:释放 stage→TMA" style="text;html=1;fontSize=10;fontColor=#0050EF;fontStyle=1" vertex="1" parent="1"><mxGeometry x="700" y="510" width="290" height="16" as="geometry" /></mxCell>
-        <mxCell id="ev3" value="" style="line;strokeWidth=2;direction=north;strokeColor=#2D7600;dashed=1;" vertex="1" parent="1"><mxGeometry x="989" y="104" width="10" height="392" as="geometry" /></mxCell>
+        <mxCell id="ev3" value="" style="rounded=0;fillColor=#2D7600;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="989" y="104" width="3" height="392" as="geometry" /></mxCell>
         <mxCell id="ev3l" value="full[s+1] @834 → 周期重复" style="text;html=1;fontSize=10;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="996" y="494" width="180" height="16" as="geometry" /></mxCell>
         <mxCell id="ovl" value="暴露窗 ≈ 0.26–0.29 µs/kb = transform 链尾 + 双跳唤醒 + UTCCP/UMMA 发射,未被 UMMA(kb X−1) 执行覆盖的部分;probe4 拿掉 transform 后此窗坍缩(8k gu 51.6→38.9 µs,R30)。× 48 kb(关键 CTA 3 tile)≈ 12.6 µs。" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#7C4DFF;align=left" vertex="1" parent="1"><mxGeometry x="160" y="530" width="1150" height="34" as="geometry" /></mxCell>
 
