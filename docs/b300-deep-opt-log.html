@@ -834,6 +834,24 @@
   收益尺度 ~0.2-1 µs/点。fused 单核设计在此约束下已近结构地板:
   decode 全反超、prefill down 平价、8k gu 差距的大头是 wave-ceil 运气(R29)。</blockquote>
 
+  <h3>协作攻坚 · R32 链刀两连:双 block 交错(中性)+ rcp 消融(证无罪)(2026-08-02 凌晨)</h3>
+  <p><strong>双 block 显式交错</strong>(<code>decompose_block_packed_x2</code>:两棵 amax 树
+  并行、两条标量链前置、元素运算按 word 交错):正确性逐位完美(三 policy 全部命中
+  期望值 0.999921/0.999958/0.999898),性能<b>全平</b>(8k gu 51.46 vs 51.27,16k
+  65.69 vs 65.68)——ptxas 对展开循环早已做跨 block 调度,显式化无增量。保留(逐位
+  安全,相位结构便于后续标量试验),归档为中性。</p>
+  <p><strong>rcp 消融</strong>(fast_rcp → 直通,结果作废仅计时):8k gu 51.24(−0.22)、
+  16k 65.80(±0)、8k dn 28.67(±0)——<b>MUFU.RCP 不是慢环节</b>,~25ns 延迟几乎全被
+  ILP 覆盖。精确替代方案(e4m3 尾数 8 项 f32 倒数表 + 指数域整数减法,数学上精确)
+  已备好但上限仅 0.2 µs,搁置。</p>
+  <p><strong>当前链示意</strong>(每 kb 每 transform warp,w16 一 slot=2 block,
+  暴露 ~0.26 µs):唤醒 50-80ns → LDS.128×4 40-60 → amax 树×2 50-60 → ×1/6+floor 15 →
+  <b>CVT s0 编码 20-25(舍入契约,不可替代)</b> → 整数解码 7 → rcp 20-25(已证被盖)→
+  pack 15 → pass-1 50-70 → pass-2 60-80 → fence+arrive+MMA 唤醒 60-100。
+  <b>两端同步开销(~0.11-0.18 µs)已占暴露链之半</b>;中间计算段经 V3/树形/整数化后
+  每环节皆为 1-2 条指令。数学侧的可削空间已萃干,剩余属于 mbarrier 唤醒延迟
+  (硬件属性)与 s0 编码 CVT(契约)。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

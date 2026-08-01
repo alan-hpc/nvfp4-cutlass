@@ -335,6 +335,120 @@ CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
     }
 }
 
+/// Two independent blocks decomposed with their chains explicitly interleaved.
+///
+/// The transform's exposed cost is per-kb dependency-chain latency (R31), and
+/// a slot's blocks are independent: phase-ordering both amax trees and both
+/// scalar chains (E4M3 round trip + MUFU rcp, the longest-latency links)
+/// ahead of the element math lets block B's scalar latency hide under block
+/// A's quantization instead of serializing after it.  Same operations in the
+/// same rounding order as the single-block form -- bitwise identical output.
+template<ScalePolicy kScalePolicy, bool kEnableResidualPass = true>
+CUTLASS_DEVICE void decompose_block_packed_x2(const uint32_t (&xa)[kBlockSize / 2],
+                                              const uint32_t (&xb)[kBlockSize / 2],
+                                              uint32_t (&q0a)[kBlockSize / 8],
+                                              uint32_t (&q0b)[kBlockSize / 8],
+                                              uint32_t (&q1a)[kBlockSize / 8],
+                                              uint32_t (&q1b)[kBlockSize / 8],
+                                              uint32_t& s0ca,
+                                              uint32_t& s0cb,
+                                              uint32_t& s1ca,
+                                              uint32_t& s1cb)
+{
+    if constexpr (kScalePolicy == ScalePolicy::ResidualAmax)
+    {
+        // The absolute-domain policy has data-dependent scalar work mid-chain;
+        // keep it on the plain path (non-default, correctness over cycles).
+        decompose_block_packed<kScalePolicy, kEnableResidualPass>(xa, q0a, q1a, s0ca, s1ca);
+        decompose_block_packed<kScalePolicy, kEnableResidualPass>(xb, q0b, q1b, s0cb, s1cb);
+        return;
+    }
+
+    // ---- Phase 1: both amax trees, interleaved -----------------------------
+    __nv_bfloat162 ta[kBlockSize / 4], tb[kBlockSize / 4];
+#pragma unroll
+    for (uint32_t i = 0; i < kBlockSize / 4; ++i)
+    {
+        ta[i] = __hmax2(__habs2(*reinterpret_cast<const __nv_bfloat162*>(&xa[2 * i])),
+                        __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xa[2 * i + 1])));
+        tb[i] = __hmax2(__habs2(*reinterpret_cast<const __nv_bfloat162*>(&xb[2 * i])),
+                        __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xb[2 * i + 1])));
+    }
+#pragma unroll
+    for (uint32_t stride = kBlockSize / 8; stride > 0; stride /= 2)
+#pragma unroll
+        for (uint32_t i = 0; i < stride; ++i)
+        {
+            ta[i] = __hmax2(ta[i], ta[i + stride]);
+            tb[i] = __hmax2(tb[i], tb[i + stride]);
+        }
+    const uint32_t swa = __byte_perm(*reinterpret_cast<const uint32_t*>(&ta[0]), 0, 0x1032);
+    const uint32_t swb = __byte_perm(*reinterpret_cast<const uint32_t*>(&tb[0]), 0, 0x1032);
+    const __nv_bfloat162 ma = __hmax2(ta[0], *reinterpret_cast<const __nv_bfloat162*>(&swa));
+    const __nv_bfloat162 mb = __hmax2(tb[0], *reinterpret_cast<const __nv_bfloat162*>(&swb));
+    const float amax_a = __bfloat162float(ma.x);
+    const float amax_b = __bfloat162float(mb.x);
+
+    // ---- Phase 2: both scalar chains (the two MUFU rcps pipeline) ----------
+    constexpr float kRadix = kResidualRadix<kScalePolicy>;
+    s0ca = ptx::cvt_e4m3(fmaxf(amax_a * kInvE2M1Max, kS0FloorDerivedDiv8));
+    s0cb = ptx::cvt_e4m3(fmaxf(amax_b * kInvE2M1Max, kS0FloorDerivedDiv8));
+    const float s0fa = __int_as_float((s0ca << 20) + 0x3C000000u);
+    const float s0fb = __int_as_float((s0cb << 20) + 0x3C000000u);
+    const float inva = math::fast_rcp(s0fa);
+    const float invb = math::fast_rcp(s0fb);
+    s1ca = ptx::cvt_e4m3(s0fa / kRadix);
+    s1cb = ptx::cvt_e4m3(s0fb / kRadix);
+    const __nv_bfloat162 inv2a = __float2bfloat162_rn(inva);
+    const __nv_bfloat162 inv2b = __float2bfloat162_rn(invb);
+
+    // ---- Phase 3: element math, word-interleaved A/B -----------------------
+    constexpr uint32_t kExpBump = ((kRadix == 8.0f ? 3u : 2u) << 7);
+    constexpr uint32_t kBump2   = kExpBump | kExpBump << 16;
+#pragma unroll
+    for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+    {
+        uint32_t ua[4], ub[4];
+#pragma unroll
+        for (uint32_t j = 0; j < 4; ++j)
+        {
+            const __nv_bfloat162 va =
+                __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&xa[4 * w + j]), inv2a);
+            const __nv_bfloat162 vb =
+                __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&xb[4 * w + j]), inv2b);
+            ua[j] = *reinterpret_cast<const uint32_t*>(&va);
+            ub[j] = *reinterpret_cast<const uint32_t*>(&vb);
+        }
+        q0a[w] = ptx::cvt_e2m1x8_bf16x2(ua[0], ua[1], ua[2], ua[3]);
+        q0b[w] = ptx::cvt_e2m1x8_bf16x2(ub[0], ub[1], ub[2], ub[3]);
+        if constexpr (kEnableResidualPass)
+        {
+            uint32_t ra[4], rb[4];
+#pragma unroll
+            for (uint32_t j = 0; j < 4; ++j)
+            {
+                const uint32_t       da = ptx::cvt_bf16x2_e2m1x2(q0a[w] >> (j * 8));
+                const uint32_t       db = ptx::cvt_bf16x2_e2m1x2(q0b[w] >> (j * 8));
+                const __nv_bfloat162 sa =
+                    __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&ua[j]),
+                            *reinterpret_cast<const __nv_bfloat162*>(&da));
+                const __nv_bfloat162 sb =
+                    __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&ub[j]),
+                            *reinterpret_cast<const __nv_bfloat162*>(&db));
+                ra[j] = *reinterpret_cast<const uint32_t*>(&sa) + kBump2;
+                rb[j] = *reinterpret_cast<const uint32_t*>(&sb) + kBump2;
+            }
+            q1a[w] = ptx::cvt_e2m1x8_bf16x2(ra[0], ra[1], ra[2], ra[3]);
+            q1b[w] = ptx::cvt_e2m1x8_bf16x2(rb[0], rb[1], rb[2], rb[3]);
+        }
+        else
+        {
+            q1a[w] = 0;
+            q1b[w] = 0;
+        }
+    }
+}
+
 /// Transform one A tile: BF16 [BLOCK_M, BLOCK_K] -> (A0, SFA0) + (A1, SFA1).
 ///
 /// Thread mapping: every thread owns one whole -- or, at 16 warps, exactly half
@@ -423,33 +537,36 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         uint32_t q0[kElemsPerSlot / 8];
         uint32_t q1[kElemsPerSlot / 8];
         uint32_t sf0_word = 0, sf1_word = 0;
+        NVFP4_STATIC_ASSERT(kBlocksPerSlot % 2 == 0, "Pairwise decompose needs an even slot");
 #pragma unroll
-        for (uint32_t b = 0; b < kBlocksPerSlot; ++b)
+        for (uint32_t p = 0; p < kBlocksPerSlot / 2; ++p)
         {
-            uint32_t block[kBlockSize / 2];
+            uint32_t ba[kBlockSize / 2], bb[kBlockSize / 2];
 #pragma unroll
             for (uint32_t i = 0; i < kBlockSize / 2; ++i)
-                block[i] = xw[b * (kBlockSize / 2) + i];
+            {
+                ba[i] = xw[(2 * p) * (kBlockSize / 2) + i];
+                bb[i] = xw[(2 * p + 1) * (kBlockSize / 2) + i];
+            }
 
-            uint32_t q0wb[kBlockSize / 8], q1wb[kBlockSize / 8];
-            uint32_t s0_code, s1_code;
-            decompose_block_packed<kScalePolicy, kEnableResidualPass>(
-                block,
-                q0wb,
-                q1wb,
-                s0_code,
-                s1_code);
+            uint32_t q0a[kBlockSize / 8], q0b[kBlockSize / 8];
+            uint32_t q1a[kBlockSize / 8], q1b[kBlockSize / 8];
+            uint32_t s0ca, s0cb, s1ca, s1cb;
+            decompose_block_packed_x2<kScalePolicy, kEnableResidualPass>(
+                ba, bb, q0a, q0b, q1a, q1b, s0ca, s0cb, s1ca, s1cb);
 
 #pragma unroll
             for (uint32_t w = 0; w < kBlockSize / 8; ++w)
             {
-                q0[b * (kBlockSize / 8) + w] = q0wb[w];
-                q1[b * (kBlockSize / 8) + w] = q1wb[w];
+                q0[(2 * p) * (kBlockSize / 8) + w]     = q0a[w];
+                q0[(2 * p + 1) * (kBlockSize / 8) + w] = q0b[w];
+                q1[(2 * p) * (kBlockSize / 8) + w]     = q1a[w];
+                q1[(2 * p + 1) * (kBlockSize / 8) + w] = q1b[w];
             }
             // The scales of an atom pack into one word, in sub-block order; a
             // half-atom slot fills its two bytes of that word.
-            sf0_word |= s0_code << (b * 8);
-            sf1_word |= s1_code << (b * 8);
+            sf0_word |= s0ca << ((2 * p) * 8) | s0cb << ((2 * p + 1) * 8);
+            sf1_word |= s1ca << ((2 * p) * 8) | s1cb << ((2 * p + 1) * 8);
         }
 
 // ---- Store A0 / A1 as swizzled 16-byte groups ------------------------
