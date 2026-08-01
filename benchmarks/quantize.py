@@ -43,7 +43,13 @@ def quantize_weight_mxfp4(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         packed.append(p)
         scales.append(s)
 
-    return torch.stack(packed).contiguous(), torch.stack(scales).contiguous()
+    # DeepGEMM's grouped-SF check wants each expert's scales MN-major
+    # (`stride(-2) == 1`) with expert blocks laid out back to back
+    # (`stride(-3) == stride(-1) * size(-1)`). A plain stack is row-major and
+    # fails both, so materialize as (E, K-words, N) and hand back the
+    # transposed view -- same bytes, MN-major strides.
+    sfb = torch.stack([s.transpose(0, 1).contiguous() for s in scales])
+    return torch.stack(packed).contiguous(), sfb.transpose(-2, -1)
 
 
 def activation_global_scale(a: torch.Tensor) -> torch.Tensor:

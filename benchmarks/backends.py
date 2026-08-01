@@ -174,7 +174,24 @@ class MXFP8MXFP4Backend(Backend):
                 f'flashinfer.mxfp8_quantize unavailable ({exc}); pip install flashinfer-python'
             ) from exc
         swizzled = self.swizzled_scales
-        return lambda: mxfp8_quantize(a, is_sf_swizzled_layout=swizzled)
+
+        # flashinfer >= 0.6 returns the swizzled SF as a flat uint8 tensor;
+        # DeepGEMM asserts int32. The 128x4 swizzle is byte-identical to
+        # DeepGEMM's packed UE8M0 MN-major layout -- word w of column-block c
+        # holds rows' 4 consecutive k-scales, columns strided by the TMA-aligned
+        # row count -- so the adaptation is a zero-copy view, not a reorder.
+        # (A wrong guess here would show up immediately as cosine ~0 in the
+        # accuracy column; the measured 0.9996 confirms the layout.)
+        m, k = a.shape
+        m_pad = (m + 127) // 128 * 128
+
+        def quantize():
+            aq, sfa = mxfp8_quantize(a, is_sf_swizzled_layout=swizzled)
+            if sfa.dtype == torch.uint8 and swizzled:
+                sfa = sfa.view(torch.int32).as_strided((m, k // 128), (1, m_pad))
+            return aq, sfa
+
+        return quantize
 
     def setup(self, problem, a, w, m_indices):
         try:
@@ -191,7 +208,11 @@ class MXFP8MXFP4Backend(Backend):
 
         def run():
             aq, sfa = quantize()
-            deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous((aq, sfa), (b, sfb), d, m_indices)
+            # Both operands carry MX-format 1x32 scale blocks; packed-int SF
+            # without an explicit recipe would be read as the FP8 1x128 layout.
+            deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+                (aq, sfa), (b, sfb), d, m_indices,
+                recipe_a=(1, 32), recipe_b=(1, 32))
             return d
 
         return run

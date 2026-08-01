@@ -34,14 +34,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backends import ALL_BACKENDS, DEFAULT_BACKENDS, Problem, Unavailable  # noqa: E402
 
-# Shape families from the algorithm doc's sweep, plus the MoE projections they
-# correspond to. M per expert is swept; N and K are fixed per family.
+# Shape families aligned to Qwen3.5-35B-A3B (hidden 2048, moe_intermediate 512,
+# 256 experts, top-8):
+#
+#   gate_up: N = 2 x 512 = 1024 (fused gate+up), K = hidden = 2048
+#   down:    N = hidden = 2048,                  K = 512
+#
+# M per expert is `tokens x topk / num_experts = tokens / 32`, independent of
+# the expert-parallel degree, so the sweep maps to per-GPU token counts of
+# 4k / 8k / 16k / 32k. NUM_EXPERTS is the *per-GPU* expert count, 256 / EP;
+# the default 32 is EP=8. All dimensions are multiples of 128, which is the
+# kernel's alignment requirement -- real serving pads ragged experts up.
 SHAPE_FAMILIES = {
     'gate_up': (1024, 2048),
     'down': (2048, 512),
 }
-M_PER_EXPERT = [128, 256, 512, 1024, 2048]
-NUM_EXPERTS = 4
+M_PER_EXPERT = [128, 256, 512, 1024]
+NUM_EXPERTS = 32
 
 
 def build_problem_inputs(problem: Problem, device: str, seed: int = 0):
