@@ -40,6 +40,16 @@ CUTLASS_DEVICE void st_shared(const uint32_t* ptr, uint32_t val)
 }
 
 /// Half-word store, for writers that own only part of a 4-byte SF atom word.
+CUTLASS_DEVICE void st_shared(const uint8_t* ptr, uint8_t val)
+{
+    asm volatile("st.shared.u8 [%0], %1;" ::"l"(__cvta_generic_to_shared(ptr)), "h"(static_cast<uint16_t>(val)));
+}
+
+CUTLASS_DEVICE void st_shared_v2(const void* ptr, uint32_t x, uint32_t y)
+{
+    asm volatile("st.shared.v2.b32 [%0], {%1, %2};" ::"l"(__cvta_generic_to_shared(ptr)), "r"(x), "r"(y));
+}
+
 CUTLASS_DEVICE void st_shared(const uint16_t* ptr, uint16_t val)
 {
     asm volatile("st.shared.u16 [%0], %1;" ::"l"(ptr), "h"(val));

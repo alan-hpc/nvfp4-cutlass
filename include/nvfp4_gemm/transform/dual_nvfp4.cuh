@@ -492,8 +492,8 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
     constexpr uint32_t kBlocksPerSlot =
         kTotalBlocks / kNumTransformThreads < kSFPerAtom ? kTotalBlocks / kNumTransformThreads
                                                          : kSFPerAtom;
-    NVFP4_STATIC_ASSERT(kBlocksPerSlot == kSFPerAtom or kBlocksPerSlot * 2 == kSFPerAtom,
-                        "A transform slot must be a whole or half scale atom");
+    NVFP4_STATIC_ASSERT(kBlocksPerSlot >= 1 and kSFPerAtom % kBlocksPerSlot == 0,
+                        "A transform slot must be a whole, half or quarter scale atom");
     constexpr uint32_t kThreadsPerAtom = kSFPerAtom / kBlocksPerSlot;
     constexpr uint32_t kElemsPerSlot   = kBlocksPerSlot * kBlockSize;
     constexpr uint32_t kNumSlots       = kTotalBlocks / kBlocksPerSlot;
@@ -600,13 +600,24 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         }
 
 // ---- Store A0 / A1 as swizzled 16-byte groups ------------------------
-#pragma unroll
-        for (uint32_t g = 0; g < kElemsPerSlot / 2 / 16; ++g)
+        // A quarter-atom slot owns only 8 packed bytes; two such slots share
+        // one 16-byte swizzle unit with disjoint 8-byte halves.
+        if constexpr (kElemsPerSlot / 2 >= 16)
         {
-            const uint32_t k_byte = k_base / 2 + g * 16;
-            const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleA0Mode>(m, k_byte);
-            ptx::st_shared(smem_a0 + offset, q0[g * 4 + 0], q0[g * 4 + 1], q0[g * 4 + 2], q0[g * 4 + 3]);
-            ptx::st_shared(smem_a1 + offset, q1[g * 4 + 0], q1[g * 4 + 1], q1[g * 4 + 2], q1[g * 4 + 3]);
+#pragma unroll
+            for (uint32_t g = 0; g < kElemsPerSlot / 2 / 16; ++g)
+            {
+                const uint32_t k_byte = k_base / 2 + g * 16;
+                const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleA0Mode>(m, k_byte);
+                ptx::st_shared(smem_a0 + offset, q0[g * 4 + 0], q0[g * 4 + 1], q0[g * 4 + 2], q0[g * 4 + 3]);
+                ptx::st_shared(smem_a1 + offset, q1[g * 4 + 0], q1[g * 4 + 1], q1[g * 4 + 2], q1[g * 4 + 3]);
+            }
+        }
+        else
+        {
+            const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleA0Mode>(m, k_base / 2);
+            ptx::st_shared_v2(smem_a0 + offset, q0[0], q0[1]);
+            ptx::st_shared_v2(smem_a1 + offset, q1[0], q1[1]);
         }
 
         // ---- Store the scale word, already in UTCCP order --------------------
@@ -620,12 +631,17 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
             ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa0 + sf_offset), sf0_word);
             ptx::st_shared(reinterpret_cast<const uint32_t*>(smem_sfa1 + sf_offset), sf1_word);
         }
-        else
+        else if constexpr (kThreadsPerAtom == 2)
         {
             ptx::st_shared(reinterpret_cast<const uint16_t*>(smem_sfa0 + sf_offset),
                            static_cast<uint16_t>(sf0_word));
             ptx::st_shared(reinterpret_cast<const uint16_t*>(smem_sfa1 + sf_offset),
                            static_cast<uint16_t>(sf1_word));
+        }
+        else
+        {
+            ptx::st_shared(smem_sfa0 + sf_offset, static_cast<uint8_t>(sf0_word));
+            ptx::st_shared(smem_sfa1 + sf_offset, static_cast<uint8_t>(sf1_word));
         }
     }
 }

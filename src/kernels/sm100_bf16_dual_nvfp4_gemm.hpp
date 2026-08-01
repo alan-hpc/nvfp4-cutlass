@@ -141,7 +141,7 @@ struct DualNVFP4Config
         const int num_transform_blocks  = block_m * block_k / 16;
         NVFP4_HOST_ASSERT_MSG(num_transform_warps > 0 and
                                   num_transform_blocks % num_transform_threads == 0 and
-                                  num_transform_threads * 2 <= num_transform_blocks,
+                                  num_transform_threads <= num_transform_blocks,
                               "transform threads must evenly divide the A tile");
         // `kNumUMMAStoreThreads == STORE_BLOCK_M == 128` reads the accumulator.
         NVFP4_HOST_ASSERT_MSG(num_epilogue_threads >= std::min(block_m, 128) and
@@ -263,7 +263,10 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     {
         config.block_k             = 64;
         config.swizzle_ab_mode     = 32;
-        config.num_transform_warps = 8;
+        // Sixteen warps at one block per thread (quarter-atom slots): the
+        // per-slot chain is the pacing recurrence at depth 6, so halving the
+        // per-thread block count buys 16k gate_up another 2 us.
+        config.num_transform_warps = 16;
         config.swizzle_cd_mode     = 64;
         // compute_stages' deepest-fit picks 6 for this geometry.
     }
