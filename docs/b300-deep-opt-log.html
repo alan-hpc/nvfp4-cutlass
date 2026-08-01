@@ -559,6 +559,30 @@
       非 transform 可优化。</li>
   </ul>
 
+  <h3>协作攻坚 · prefill +14.4 µs 的三层定位（2026-08-01 上午）</h3>
+  <p><strong>第一层（引擎队列探针，tune_timing_probe=1/2，仅计时）</strong>：
+  单独去掉 SFA1-UTCCP → <b>+0.05 µs</b>（H1「UTCCP 偷张量核时间」证伪）；
+  单独去掉第二条 UMMA → <b>+2.06 µs</b>；剩余 ~12.2 µs 归属 transform 第二遍。</p>
+  <p><strong>第二层（warp 级时钟探针，tune_timing_probe=3 + set_probe_buffer）</strong>：
+  每角色 wait/work 周期记账，lane0 本地累计、每 tile 一次 atomicAdd 落全局：</p>
+  <div class="tablewrap"><table>
+    <tr><th>角色（prefill 8k gate_up dual，周期 ≈1.0 µs/kb）</th><th class="num">wait</th><th class="num">work</th></tr>
+    <tr><td>TMA 生产者</td><td class="num">0.865</td><td class="num">0.127</td></tr>
+    <tr><td><strong>transform</strong></td><td class="num">0.180</td><td class="num"><strong>0.875（87% 占空比，饱和）</strong></td></tr>
+    <tr><td>MMA</td><td class="num">0.687</td><td class="num">0.326</td></tr>
+    <tr><td>epilogue（每 tile）</td><td class="num">17.2</td><td class="num">2.36</td></tr>
+  </table></div>
+  <p>交叉闭合：dual−single 的 transform work 差 0.34 µs/kb × 34.6 slots ≈ 11.8 µs ≈
+  探针剩余 12.2 µs ✓。<b>TMA 在等、MMA 在等、transform 在干——prefill 的卡点是
+  transform 第二遍的计算吞吐</b>（此前「prefill transform 有余量」的判断被此推翻；
+  decode 的 tw8 全藏结论只适用于 bk256 小 tile 工况）。</p>
+  <p><strong>第三层（指令构成）</strong>：work 0.875 µs/kb ≈ 1690 cycles，纯发射下限
+  ~440——3.8× 膨胀主要来自 pass-2 的 ~24 个 CVT 慢管线操作/16 元素
+  （dec(q0) 往返 + q1 打包）。<strong>修复方向（下一工作块）</strong>：packed bf16x2
+  热循环 + CVT 削减，目标 0.875→~0.65 µs/kb ⇒ prefill dual 63.5→~56 µs；
+  w16 已是 bk128 合法上限，加 warp 无路。探针基础设施
+  （tune_timing_probe / set_probe_buffer）保留在库内供后续定位复用。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

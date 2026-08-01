@@ -44,7 +44,8 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
                                                       int                  tune_l2_pin_weights,
                                                       int                  tune_no_pdl,
                                                       int                  tune_sched_group,
-                                                      int                  tune_split_transform)
+                                                      int                  tune_split_transform,
+                                                      int                  tune_timing_probe)
 {
     const int m          = static_cast<int>(a.size(0));
     const int k          = static_cast<int>(a.size(1));
@@ -131,7 +132,8 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
         tune_l2_pin_weights,
         tune_no_pdl,
         tune_sched_group,
-        tune_split_transform);
+        tune_split_transform,
+        tune_timing_probe);
 }
 
 inline void register_apis(pybind11::module_& m)
@@ -139,6 +141,11 @@ inline void register_apis(pybind11::module_& m)
     m.def("init", [](const std::string& include_root, const std::string& cuda_home) { jit::compiler->init(include_root, cuda_home); }, pybind11::arg("include_root"), pybind11::arg("cuda_home"));
 
     m.def("get_num_sms", []() { return device_runtime->get_num_sms(); });
+    // Warp-clock probe: hand a 16-element int64 CUDA tensor to the next
+    // launch (tune_timing_probe=3); pass None to detach.
+    m.def("set_probe_buffer", [](std::optional<torch::Tensor> t) {
+        probe_buffer_for_launch = t.has_value() ? t->data_ptr() : nullptr;
+    });
     m.def("set_num_sms", [](int value) { device_runtime->set_num_sms(value); }, pybind11::arg("num_sms"));
 
     m.def("m_grouped_bf16_dual_nvfp4_gemm_contiguous",
@@ -180,7 +187,10 @@ inline void register_apis(pybind11::module_& m)
           // Split transform: signal A0/SFA0 readiness before the residual
           // quantization, so MMA pass 0 overlaps the residual pass (the
           // algorithm doc's fine-grained pipeline).
-          pybind11::arg("tune_split_transform")   = 0);
+          pybind11::arg("tune_split_transform")   = 0,
+          // TIMING DECOMPOSITION ONLY -- 1 drops SFA1 UTCCPs, 2 drops the
+          // second UMMA; both produce wrong numbers by design.
+          pybind11::arg("tune_timing_probe")      = 0);
 }
 
 }   // namespace nvfp4_gemm::api

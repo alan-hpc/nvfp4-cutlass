@@ -174,6 +174,11 @@ inline const char* to_string(const GemmType& type)
     return "GemmType::Normal";
 }
 
+/// Warp-clock probe target: set by the API layer before a probed launch,
+/// consumed by the very next launch. Not thread-safe -- probing is a
+/// measurement mode, not a production path.
+inline void* probe_buffer_for_launch = nullptr;
+
 /// Fused BF16 x NVFP4 m-grouped contiguous GEMM (MoE expert GEMM).
 ///
 /// Args:
@@ -208,7 +213,8 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
                                                             int                  tune_l2_pin_weights,
                                                             int                  tune_no_pdl,
                                                             int                  tune_sched_group,
-                                                            int                  tune_split_transform)
+                                                            int                  tune_split_transform,
+                                                            int                  tune_timing_probe)
 {
     DualNVFP4Config config;
     if (tune_block_n > 0)
@@ -308,7 +314,8 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
          << "        " << (enable_residual_pass ? "true" : "false") << ",\n"
          << "        " << (tune_direct_a ? "true" : "false") << ",\n"
          << "        " << tune_sched_group << ",\n"
-         << "        " << (tune_split_transform ? "true" : "false") << ">);\n"
+         << "        " << (tune_split_transform ? "true" : "false") << ",\n"
+         << "        " << tune_timing_probe << ">);\n"
          << "    (void) ptr;\n}\n";
 
     // Distinct cache names per variant keep the two pass counts from colliding
@@ -338,8 +345,13 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     // pointer travels as a plain kernel argument next to the TMA descriptors.
     auto* a_ptr = a.data_ptr();
     auto  lda   = static_cast<uint32_t>(a.stride(0));
+    // Warp-clock probe buffer: m_indices' storage is borrowed as an anchor
+    // only when probing is off; when tune_timing_probe==3 the caller appends
+    // a 16-element int64 tensor via the `gw` trick... instead we thread an
+    // explicit optional pointer through the environment-free path below.
+    void* probe_ptr = probe_buffer_for_launch;
 
-    jit::launch(kernel, launch_config, grouped_layout, global_scales, shape_m, shape_n, shape_k, map_a, map_b, map_sfb, map_cd, a_ptr, lda);
+    jit::launch(kernel, launch_config, grouped_layout, global_scales, shape_m, shape_n, shape_k, map_a, map_b, map_sfb, map_cd, a_ptr, lda, probe_ptr);
 }
 
 /// Swap-AB variant for small-M batches (decode / small prefill).
