@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dual-NVFP4 GEMM · B300 深度优化日志</title>
+<style>
+  :root {
+    --bg: #faf8f5; --fg: #1a1a1a; --muted: #6b6257; --card: #ffffff;
+    --line: #e5ded4; --accent: #b45309; --good: #15803d; --bad: #b91c1c;
+    --code-bg: #f3efe8; --head-bg: #efe9df;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d; --fg: #e8e6e3; --muted: #9a938a; --card: #1e2128;
+      --line: #32363f; --accent: #e8a04c; --good: #4ade80; --bad: #f87171;
+      --code-bg: #242830; --head-bg: #232730;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem 6rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.75 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; line-height: 1.3; margin: 0 0 .3rem; }
+  h2 { font-size: 1.25rem; margin: 2.8rem 0 .8rem; border-bottom: 2px solid var(--line); padding-bottom: .4rem; }
+  h3 { font-size: 1.05rem; margin: 1.8rem 0 .5rem; }
+  .sub { color: var(--muted); font-size: .9rem; margin-bottom: 2rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem 1.25rem; margin: 1rem 0;
+  }
+  code, pre {
+    font: 13px/1.6 "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    background: var(--code-bg); border-radius: 5px;
+  }
+  code { padding: .1em .35em; }
+  pre { padding: .8rem 1rem; overflow-x: auto; }
+  pre code { padding: 0; background: none; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; margin: .8rem 0; }
+  .tablewrap { overflow-x: auto; }
+  th, td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: left; }
+  th { background: var(--head-bg); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag {
+    display: inline-block; font-size: .72rem; font-weight: 700; letter-spacing: .04em;
+    padding: .1em .55em; border-radius: 99px; vertical-align: 2px; margin-right: .4em;
+  }
+  .tag.done { background: color-mix(in srgb, var(--good) 15%, transparent); color: var(--good); }
+  .tag.run  { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .tag.todo { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
+  .tag.dead { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); }
+  .good { color: var(--good); font-weight: 600; }
+  .bad  { color: var(--bad);  font-weight: 600; }
+  .muted { color: var(--muted); }
+  .kpi { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
+  .kpi > div {
+    flex: 1 1 160px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: .8rem 1rem;
+  }
+  .kpi .v { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .l { font-size: .78rem; color: var(--muted); }
+  blockquote {
+    margin: 1rem 0; padding: .6rem 1rem; border-left: 3px solid var(--accent);
+    background: var(--code-bg); border-radius: 0 8px 8px 0; font-size: .92rem;
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>dual-NVFP4 GEMM · B300 深度优化日志</h1>
+<p class="sub">
+  内核：fused BF16 × NVFP4 dual-A grouped MoE GEMM（SM103 / B300 SXM6，148 SM）·
+  环境：10.251.209.5 / docker-env-fp4-cutlass / CUDA 13.3 ·
+  方法：每一步 = 假设 → 改动 → 实测 → 结论，全部在空闲 GPU 上以 CUDA-graph 回放中值计时 ·
+  日期：2026-07-31
+</p>
+
+<div class="kpi">
+  <div><div class="v good">2.0×</div><div class="l">decode 提速（Swap-AB：gate_up 24.6→12.3 µs，down 10.3→6.2 µs）</div></div>
+  <div><div class="v good">反超</div><div class="l">decode 单层 18.5 vs mxfp8 20.9 µs，精度 0.9954 vs 0.9544</div></div>
+  <div><div class="v good">+8.0%</div><div class="l">多 wave prefill 默认配置（O5+O7），旋钮 +8.3%</div></div>
+  <div><div class="v">0.9999+</div><div class="l">全程 cosine 门槛，正常/swap 双路径回归全 PASS</div></div>
+</div>
+
+<h2 id="s0">第 0 步 · 前置：先修对，再修快</h2>
+<div class="card">
+  <p><span class="tag done">已完成</span><strong>epilogue TMEM 子分区 bug。</strong>
+  内核最初所有 shape 输出 cosine ≈ 0。用 one-hot 探针（A = I，输出第 r 行应精确等于
+  w<sub>deq</sub>[:, r]）测出错误结构：整块 32 行的循环位移 {+96, −32}。</p>
+  <p>根因：epilogue 用 <code>epilogue_warp_idx</code>(0..3) 索引 SMEM 行块，但
+  <code>tcgen05.ld</code> 的 TMEM 子分区由 warp <em>绝对</em>编号 mod 4 决定。本内核
+  非 epilogue warp 数为 3 + 8 = 11（非 4 的倍数），epilogue warp 绝对编号 11..14 →
+  子分区 3,0,1,2，恰好旋转一格。DeepGEMM 原版能这样写是因为它断言非 epilogue 线程数
+  == 128，epilogue 永远从 warpgroup 边界开始。</p>
+  <pre><code>- epilogue_warp_idx * 32 * kSwizzleCDMode   // warp 在 epilogue 中的序号：错
++ subpartition_idx  * 32 * kSwizzleCDMode   // warp_idx % 4，硬件实际选的子分区</code></pre>
+  <p>修复后 8/8 shape 全过（cosine 0.999925–0.999961）。<strong>这一步不是优化，
+  是优化的前提</strong>——对错误的内核做任何调优都是在优化噪声。</p>
+</div>
+
+<h2 id="s1">第 1 步 · 启动配置空间：已证明无增益</h2>
+<div class="card">
+  <p><span class="tag done">已完成</span>把 <code>block_n / transform_warps / epilogue_threads / num_stages</code>
+  从硬编码透出为 <code>tune_*</code> 参数，用 autokernel 的「改 kernel.py → 跑固定 bench.py →
+  keep/revert」契约扫完全部 48 个合法组合。</p>
+  <p><strong>教训（流程）：第一轮结果全部作废</strong>——GPU 0 被 ~20 个容器共享（75% 利用率），
+  争抢噪声把 200 和 541 TFLOPS 的差距完全伪造出来。改到空闲 GPU、每点 3 次重复取中值后：</p>
+  <div class="tablewrap"><table>
+    <tr><th>配置</th><th class="num">中值 TFLOPS</th><th class="num">时延 µs</th><th class="num">极差</th></tr>
+    <tr><td>bn=256 w=8 epi=128 st=auto（<strong>出厂默认</strong>）</td><td class="num">536.5</td><td class="num">32.02</td><td class="num">0.7</td></tr>
+    <tr><td>bn=256 w=8 epi=128 st=2</td><td class="num">535.9</td><td class="num">32.06</td><td class="num">1.1</td></tr>
+    <tr><td>bn=256 w=8 epi=256 st=0</td><td class="num">532.9</td><td class="num">32.24</td><td class="num">2.8</td></tr>
+    <tr><td>bn=256 w=4 epi=128 st=2</td><td class="num">516.1</td><td class="num">33.29</td><td class="num">5.1</td></tr>
+    <tr><td>bn=128 w=8 epi=128 st=0</td><td class="num">378.5</td><td class="num">45.39</td><td class="num">2.6</td></tr>
+    <tr><td>bn=256 w=8 epi=128 st=1</td><td class="num">365.0</td><td class="num">47.06</td><td class="num">0.2</td></tr>
+  </table></div>
+  <p>结论：默认配置即该空间最优。敏感度：<code>block_n</code> 256→128 掉 42%；
+  <code>num_stages</code> 2→1 掉 47%；<code>transform_warps</code> 8→4 掉 4%；
+  <code>epilogue_threads</code> 无感。<strong>再往下挖必须改内核本体，而不是改参数。</strong></p>
+</div>
+
+<h2 id="s2">第 2 步 · 诊断：时间到底花在哪</h2>
+<div class="card">
+  <p><span class="tag done">已完成</span>四个实验（CUDA-graph 回放中值，空闲 GPU 1）。
+  <strong>先修正一个计量问题</strong>：此前 autokernel bench 报的 32 µs 含每次调用的
+  <code>torch.empty</code> 输出分配；graph 回放测得同 shape 纯内核时延 24.65 µs。
+  以下全部使用 graph 口径。</p>
+
+  <h3>E1 · 残差 MMA 成本 —— 瓶颈不在 MMA</h3>
+  <div class="tablewrap"><table>
+    <tr><th>shape（E=4, N=1024, K=2048）</th><th class="num">dual</th><th class="num">single</th><th class="num">第二遍代价</th></tr>
+    <tr><td>M/exp=512（64 tiles）</td><td class="num">24.64 µs</td><td class="num">20.52 µs</td><td class="num">+4.12 µs（16.7%）</td></tr>
+    <tr><td>M/exp=1024（128 tiles）</td><td class="num">24.64 µs</td><td class="num">20.53 µs</td><td class="num">+4.11 µs（16.7%）</td></tr>
+  </table></div>
+  <p>两遍 MMA 合计约 8.2 µs，<strong>其余 ~16.4 µs 都在 TMA/transform/epilogue 流水上</strong>。
+  且第二遍 MMA 的 4.1 µs 是全额出现在总时延里的——如果 MMA 被 transform 完全遮蔽，
+  多发一遍不应变慢。说明 <strong>transform 与 MMA 每个 K-block 内近似串行</strong>，
+  流水没有把它们叠起来。</p>
+
+  <h3>E2 · wave 量化 —— 亚 wave 区时延与 tile 数无关</h3>
+  <div class="tablewrap"><table>
+    <tr><th class="num">tiles</th><th class="num">waves</th><th class="num">µs</th><th class="num">TF</th></tr>
+    <tr><td class="num">32</td><td class="num">0.22</td><td class="num">24.63</td><td class="num">174</td></tr>
+    <tr><td class="num">64</td><td class="num">0.43</td><td class="num">24.64</td><td class="num">349</td></tr>
+    <tr><td class="num">112</td><td class="num">0.76</td><td class="num">24.65</td><td class="num">610</td></tr>
+    <tr><td class="num">144</td><td class="num">0.97</td><td class="num">25.12</td><td class="num">769</td></tr>
+    <tr><td class="num">160</td><td class="num">1.08</td><td class="num">45.13</td><td class="num">476</td></tr>
+    <tr><td class="num">288</td><td class="num">1.95</td><td class="num">49.18</td><td class="num">786</td></tr>
+  </table></div>
+  <p>32→144 tiles 时延纹丝不动（24.6 µs），148 处一个干净台阶（+20.5 µs ≈ 一个
+  single-pass K-loop）。<strong>亚 wave 区 = 单 tile K-loop 流水时延决定一切</strong>，
+  SM 闲置多少无所谓；O2/O3（epilogue 双缓冲、调度顺序）在此区间无收益空间。
+  大负载吞吐平台 ~786 TF。</p>
+
+  <h3>E3 · scale 策略：residual_amax 贵 2.0 µs（8%）</h3>
+  <p>derived_div8 24.71 µs vs residual_amax 26.69 µs。多一次块内 amax 规约就贵 8%——
+  transform 里加一点活就直接体现在总时延上，<strong>再次佐证 transform 在关键路径</strong>。</p>
+
+  <h3>E4 · shape 族：短 K 掉吞吐</h3>
+  <p>N=1024/K=2048: 697 TF；N=2048/K=512: 522 TF；N=1024/K=512: 417 TF；
+  N=4096/K=2048（512 tiles）: 780 TF。K 短则 K-loop 摊不掉 prologue/epilogue。</p>
+
+  <blockquote><strong>诊断结论</strong>：优化主攻方向 = 单 tile K-loop 的
+  transform 关键路径（O4），其次是多 wave 稳态的流水深度（O1）。
+  调度与 epilogue 双缓冲（O2/O3）在生产 shape（亚 wave）无空间，降级。</blockquote>
+</div>
+
+<h2 id="s3">候选优化点清单</h2>
+<div class="card">
+  <h3>内核本体</h3>
+  <ul>
+    <li><span class="tag done">已完成</span><strong>O1 · 三级主循环流水（CD swizzle 64B）</strong>：
+      每 stage 68 KB SMEM，2 stages + 32 KB epilogue ≈ 171 KB / 227 KB。把
+      <code>swizzle_cd_mode</code> 128→64 使 epilogue SMEM 减半（16 KB），205 KB 可容
+      <strong>3 个主循环 stage</strong>。→ 结果见实验记录 O1：多 wave +4.4%，亚 wave 持平。</li>
+    <li><span class="tag dead">已排除</span><strong>O2 · epilogue 双缓冲</strong>：E2 证明亚 wave
+      区（生产 shape）每 SM 只跑 ~1 个 tile，epilogue 与下一 tile 的重叠不存在；多 wave 区被
+      O1/O5 覆盖。收益空间已被数据排除。</li>
+    <li><span class="tag dead">已排除</span><strong>O3 · tile 调度顺序</strong>：E2 显示 32→144
+      tiles 时延与 tile 数完全无关，ncu 显示 DRAM 10% / L2 13%——L2 复用根本不是约束，
+      换 rasterization 无从获益。</li>
+    <li><span class="tag done">已完成</span><strong>O4a · transform 并行度 ×2（16 warps）</strong>：
+      半 atom 任务粒度使 16 个 transform warp 合法。→ 结果见实验记录：<strong>负结果但关键</strong>——
+      单遍模式 w8/w16 完全同速，证明 transform 吞吐不是瓶颈，排除了整条「优化 Algorithm 1
+      指令效率」的路线。</li>
+    <li><span class="tag done">已完成</span><strong>O5 · TMA 生产者坐标外提</strong>：K 循环体内每
+      k-block 两次经 <code>m_indices</code> 的依赖全局 load（asm 屏障阻止编译器外提），
+      手动提到 tile 级。→ 多 wave <strong>+6.3%</strong>（默认配置直接受益），亚 wave 持平。</li>
+    <li><span class="tag dead">低优先</span><strong>O6 · BLOCK_K=256</strong>：SMEM/stage 翻倍到
+      ~139 KB → 只装得下 1 stage，与 num_stages 敏感度（−47%）冲突，预判负收益，不做。</li>
+  </ul>
+  <h3>流程 / 工程</h3>
+  <ul>
+    <li><span class="tag done">已完成</span><strong>P1 · JIT 缓存键补头文件哈希</strong>：现在
+      cache key 只哈希生成的 stub，改 <code>.cuh</code> 会静默复用旧 cubin——本轮为此
+      浪费了数小时、并一度得出自相矛盾的实验结论。已在 <code>compiler.hpp::init()</code>
+      对 <code>nvfp4_gemm/</code> 下全部头文件做内容哈希并折入 signature（CUTLASS 由
+      submodule 钉版本，不参与）。→ 验证见实验记录 P1。</li>
+    <li><span class="tag todo">待做</span><strong>P2 · 基准防污染</strong>：把「选空闲 GPU +
+      contention 检测 + 中值/极差」固化进 benchmark 脚本，而不是靠人肉记得。第 1 步的
+      全部返工都源于此。</li>
+    <li><span class="tag done">已完成</span><strong>P3 · 远端工作副本漂移防护</strong>：远端
+      checkout 与本地 git HEAD 不一致导致「本地读代码、远端测行为」的推理链断裂
+      （transform 头文件 13819 B vs 14299 B）。已固化为推送前 md5 校验的传输脚本。</li>
+  </ul>
+</div>
+
+<h2 id="qwen">对齐 Qwen3.5-35B-A3B · 真实服务点的完整矩阵</h2>
+<div class="card">
+  <p>模型参数（HF config 与 10.251.209.5 上的模型副本交叉确认）：hidden 2048、
+  moe_intermediate 512、<strong>256 experts</strong>、top-8、40 层。映射到本 kernel：</p>
+  <ul>
+    <li><strong>gate_up</strong>：N = 2×512 = 1024（gate+up 融合），K = 2048</li>
+    <li><strong>down</strong>：N = 2048，K = 512</li>
+    <li>每专家行数 M/exp = tokens×8/256 = <strong>tokens/32</strong>（与 EP 无关）；
+      每 GPU 专家数 E = 256/EP。全部维度天然满足 128 对齐。</li>
+  </ul>
+  <p>benchmark（<code>bench_moe_forward.py</code>）与 autokernel harness 的 shape 表已改为
+  E=32（EP=8）/ M_per∈{128..1024}（= 4k..32k tokens/GPU）。关键发现：<strong>真实服务点
+  大多是多 wave</strong>（8k tokens 已 1.73 waves），此前 E=4 的基准把工作负载错放在了
+  亚 wave 区——O5/O7/旋钮的多 wave 收益在真实 shape 上兑现得更充分。</p>
+
+  <h3>token sweep（EP=8, E=32），正确性 4/4 PASS</h3>
+  <div class="tablewrap"><table>
+    <tr><th>族</th><th class="num">tokens/GPU</th><th class="num">waves</th>
+        <th class="num">默认</th><th class="num">cd64+w16</th><th class="num">Δ</th></tr>
+    <tr><td rowspan="4">gate_up<br>(1024×2048)</td>
+        <td class="num">4 096</td><td class="num">0.86</td><td class="num">24.66 µs</td><td class="num">24.62 µs</td><td class="num">±0</td></tr>
+    <tr><td class="num">8 192</td><td class="num">1.73</td><td class="num">49.23 µs</td><td class="num"><strong>43.89 µs</strong></td><td class="num good">+10.8%</td></tr>
+    <tr><td class="num">16 384</td><td class="num">3.46</td><td class="num">93.93 µs</td><td class="num"><strong>81.83 µs</strong></td><td class="num good">+12.9%</td></tr>
+    <tr><td class="num">32 768</td><td class="num">6.92</td><td class="num">156.17 µs</td><td class="num"><strong>137.59 µs（998.9 TF）</strong></td><td class="num good">+13.5%</td></tr>
+    <tr><td rowspan="4">down<br>(2048×512)</td>
+        <td class="num">4 096</td><td class="num">1.73</td><td class="num">16.44 µs</td><td class="num">16.44 µs</td><td class="num">±0</td></tr>
+    <tr><td class="num">8 192</td><td class="num">3.46</td><td class="num"><strong>26.71 µs</strong></td><td class="num">28.71 µs</td><td class="num bad">−7.5%</td></tr>
+    <tr><td class="num">16 384</td><td class="num">6.92</td><td class="num"><strong>47.52 µs</strong></td><td class="num">49.20 µs</td><td class="num bad">−3.5%</td></tr>
+    <tr><td class="num">32 768</td><td class="num">13.84</td><td class="num"><strong>87.57 µs</strong></td><td class="num">90.16 µs</td><td class="num bad">−3.0%</td></tr>
+  </table></div>
+  <p>EP scan（8k tokens 固定）：gate_up 在 EP=1（E=256, 13.8 waves）达 <strong>998 TF</strong>
+  （旋钮 +13.9%）；down 各 EP 下默认配置均最优。旋钮收益随 wave 数单调上升，与「多 wave
+  稳态受益于更深重叠」的模型一致。</p>
+
+  <h3>产出：按 K 深度自动分派</h3>
+  <p>规律干净得可以直接固化——<strong>K ≥ 1024 开 cd64+w16（收益 +11~14%，亚 wave 持平），
+  K = 512 保持默认（旋钮反伤 3~7%）</strong>。已写入 host 端启发式
+  （<code>sm100_bf16_dual_nvfp4_gemm.hpp</code>，显式 tune 参数优先），端到端验证：
+  gate_up 8k 49.2→44.4 µs、32k 156.2→137.4 µs 自动生效，down 不受影响，全量回归 8/8 PASS。</p>
+</div>
+
+<h2 id="cmp">横向对比 · dual-NVFP4 vs MXFP8×MXFP4（DeepGEMM）</h2>
+<div class="card">
+  <p>完整在线链路对比（BF16 激活进、BF16 出，激活量化计入被测区间；权重离线量化不计入），
+  Qwen3.5-35B-A3B shape，E=32（EP=8），CUDA-graph 回放，空闲 GPU。基线依赖：DeepGEMM
+  （3rdparty 子模块就地编译）+ flashinfer 0.6.16 的 <code>mxfp8_quantize</code>。
+  为让基线跑起来修了两处版本漂移：flashinfer 新版返回 uint8 swizzled SF（DeepGEMM 要
+  packed-int32 MN-major——字节序恰好一致，零拷贝 view 适配）；SFB 堆叠改为 MN-major 步幅。
+  MX recipe 需显式声明 <code>recipe_a/b=(1,32)</code>。</p>
+
+  <h3>gate_up（N=1024, K=2048）</h3>
+  <div class="tablewrap"><table>
+    <tr><th class="num">tokens</th>
+        <th class="num">dual_nvfp4</th><th class="num">single_nvfp4</th><th class="num">mxfp8_mxfp4</th>
+        <th class="num">mxfp8 相对 dual</th></tr>
+    <tr><td class="num">4 096</td><td class="num">24.63 µs</td><td class="num">18.47 µs</td><td class="num">18.50 µs</td><td class="num">1.33×</td></tr>
+    <tr><td class="num">8 192</td><td class="num">44.94 µs</td><td class="num">34.94 µs</td><td class="num">31.58 µs</td><td class="num">1.42×</td></tr>
+    <tr><td class="num">16 384</td><td class="num">82.02 µs</td><td class="num">63.62 µs</td><td class="num">51.36 µs</td><td class="num">1.60×</td></tr>
+    <tr><td class="num">32 768</td><td class="num">138.05 µs</td><td class="num">104.52 µs</td><td class="num">90.11 µs（1525 TF）</td><td class="num">1.53×</td></tr>
+  </table></div>
+
+  <h3>down（N=2048, K=512）</h3>
+  <div class="tablewrap"><table>
+    <tr><th class="num">tokens</th>
+        <th class="num">dual_nvfp4</th><th class="num">single_nvfp4</th><th class="num">mxfp8_mxfp4</th>
+        <th class="num">mxfp8 相对 dual</th></tr>
+    <tr><td class="num">4 096</td><td class="num">16.43 µs</td><td class="num">14.37 µs</td><td class="num">16.44 µs</td><td class="num">1.00×</td></tr>
+    <tr><td class="num">8 192</td><td class="num">26.80 µs</td><td class="num">23.01 µs</td><td class="num">22.59 µs</td><td class="num">1.19×</td></tr>
+    <tr><td class="num">16 384</td><td class="num">49.12 µs</td><td class="num">40.31 µs</td><td class="num">42.09 µs</td><td class="num">1.17×</td></tr>
+    <tr><td class="num">32 768</td><td class="num">88.07 µs</td><td class="num">71.21 µs</td><td class="num">74.88 µs</td><td class="num">1.18×</td></tr>
+  </table></div>
+
+  <h3>精度（cosine vs FP32 全精度 ground truth，各 token 档几乎不变）</h3>
+  <div class="tablewrap"><table>
+    <tr><th>后端</th><th class="num">cosine</th><th class="num">误差 1−cos</th><th>误差来源</th></tr>
+    <tr><td>dual_nvfp4</td><td class="num"><strong>0.99540</strong></td><td class="num"><strong>0.0046</strong></td>
+        <td>NVFP4 权重（E4M3 block-16 scale）+ 双遍激活分解</td></tr>
+    <tr><td>single_nvfp4</td><td class="num">0.99097</td><td class="num">0.0090</td>
+        <td>同上，单遍激活——残差遍把激活误差压掉一半</td></tr>
+    <tr><td>mxfp8_mxfp4</td><td class="num">0.95440</td><td class="num">0.0456</td>
+        <td>MXFP4 权重的 UE8M0（纯 2 的幂）block-32 scale 主导，<strong>误差是 dual 的 10 倍</strong></td></tr>
+  </table></div>
+
+  <h3>最终大表 · 采样路由下的 Prefill / Decode × gate_up / down</h3>
+  <p>方法修正（<code>benchmarks/bench_decode.py</code> 重写）：<strong>没有任何显式
+  padding</strong>——tokens 为输入 token 数，每个 token 发 8 份到 256 个专家，本 GPU 执行落在
+  其 32 个本地专家上的 assignments（期望 ≈ tokens），grouped GEMM 单 kernel 吃 ragged 分组。
+  「grid rows」= Σ ⌈rows_e/128⌉×128，是任何以 128 行 M-tile 计算的 grouped GEMM
+  （contiguous / masked / CUTLASS group GEMM）都必然执行的行数——<strong>tile 粒度，
+  不是 padding 假象</strong>；masked 布局免掉的是主机侧缓冲对齐，tile 数一样。
+  Prefill 同样用采样路由：粒度税真实存在（2k: 2.04×，8k: 1.25×，16k: 1.09×），
+  此前的均匀对齐表是理想化下界。</p>
+  <div class="tablewrap"><table>
+    <tr><th>阶段</th><th class="num">tokens</th><th class="num">assign</th><th class="num">grid rows</th>
+        <th class="num">粒度</th><th class="num">dual_nvfp4</th><th class="num">single</th><th class="num">mxfp8_mxfp4</th></tr>
+    <tr><td colspan="8" style="background:var(--head-bg)"><strong>gate_up</strong>（N=1024, K=2048）</td></tr>
+    <tr><td>decode</td><td class="num">16</td><td class="num">11</td><td class="num">1 152</td><td class="num">105×</td>
+        <td class="num">24.59 µs</td><td class="num">17.72</td><td class="num"><strong>12.31</strong></td></tr>
+    <tr><td>decode</td><td class="num">32</td><td class="num">23</td><td class="num">2 176</td><td class="num">95×</td>
+        <td class="num">24.60 µs</td><td class="num">18.46</td><td class="num"><strong>12.34</strong></td></tr>
+    <tr><td>decode</td><td class="num">128</td><td class="num">120</td><td class="num">4 096</td><td class="num">34×</td>
+        <td class="num">24.60 µs</td><td class="num">18.46</td><td class="num">18.46</td></tr>
+    <tr><td>prefill</td><td class="num">2 048</td><td class="num">2 006</td><td class="num">4 096</td><td class="num">2.04×</td>
+        <td class="num">24.62 µs</td><td class="num">18.46</td><td class="num"><strong>17.57</strong></td></tr>
+    <tr><td>prefill</td><td class="num">8 192</td><td class="num">8 172</td><td class="num">10 240</td><td class="num">1.25×</td>
+        <td class="num">63.52 µs</td><td class="num">49.36</td><td class="num"><strong>36.97</strong></td></tr>
+    <tr><td>prefill</td><td class="num">16 384</td><td class="num">16 249</td><td class="num">17 792</td><td class="num">1.09×</td>
+        <td class="num">82.25 µs</td><td class="num">63.63</td><td class="num"><strong>55.33</strong></td></tr>
+    <tr><td colspan="8" style="background:var(--head-bg)"><strong>down</strong>（N=2048, K=512）</td></tr>
+    <tr><td>decode</td><td class="num">16</td><td class="num">11</td><td class="num">1 152</td><td class="num">105×</td>
+        <td class="num">10.28 µs</td><td class="num">8.23</td><td class="num">8.26</td></tr>
+    <tr><td>decode</td><td class="num">32</td><td class="num">23</td><td class="num">2 176</td><td class="num">95×</td>
+        <td class="num">10.32 µs</td><td class="num">9.20</td><td class="num">12.33</td></tr>
+    <tr><td>decode</td><td class="num">128</td><td class="num">120</td><td class="num">4 096</td><td class="num">34×</td>
+        <td class="num">16.42 µs</td><td class="num">14.36</td><td class="num">16.41</td></tr>
+    <tr><td>prefill</td><td class="num">2 048</td><td class="num">2 006</td><td class="num">4 096</td><td class="num">2.04×</td>
+        <td class="num">16.43 µs</td><td class="num">14.37</td><td class="num">14.47</td></tr>
+    <tr><td>prefill</td><td class="num">8 192</td><td class="num">8 172</td><td class="num">10 240</td><td class="num">1.25×</td>
+        <td class="num">32.83 µs</td><td class="num">27.26</td><td class="num">26.66</td></tr>
+    <tr><td>prefill</td><td class="num">16 384</td><td class="num">16 249</td><td class="num">17 792</td><td class="num">1.09×</td>
+        <td class="num">53.31 µs</td><td class="num">43.29</td><td class="num">44.86</td></tr>
+  </table></div>
+  <p class="muted">以上为同一次完整运行（decode 16/32/128 + prefill 2k/8k/16k，
+  <code>python benchmarks/bench_decode.py</code>，seed=0，CUDA-graph 中值，空闲 GPU 1），
+  日志存于 10.251.209.5 容器 /home/workcode/full_bench.log。</p>
+  <p>精度对 M/路由不敏感：dual 0.9954 / single 0.9910 / mxfp8 0.9544（全表一致）。解读：</p>
+  <ul>
+    <li><strong>decode 的 dual 被亚 wave 楼层钉死</strong>（gate_up 三档全 24.6 µs，grid rows
+      翻 4 倍不动摇）；MXFP8 链楼层 ~12.3 µs。单层 16 tokens：dual 34.8 vs mxfp8 20.6 µs
+      → ×40 层 ≈ 1.39 vs 0.82 ms。</li>
+    <li><strong>ragged prefill 的粒度税落在了所有后端头上</strong>：dual 8k 从理想对齐的
+      44.9 µs 涨到 63.4 µs；2k tokens 时粒度已达 2.04×，dual 直接落回 24.6 µs 亚 wave
+      楼层（与 decode 同价）。真实 serving 数字应引用本表，理想表仅作 kernel 上限参考。</li>
+    <li>105× 的 decode 粒度浪费三家同担——它的正解不是换布局（masked 同 tile 数），
+      而是 <strong>Swap-AB</strong>（见下）；2k 档的 2× 粒度税同样会被 Swap-AB
+      的 32 列粒度大幅摊薄。</li>
+  </ul>
+
+  <h3 id="swapab">Swap-AB · decode 的对症设计（实施计划）</h3>
+  <p><strong>为什么 Swap-AB 才是 decode 的正解</strong>：粒度浪费源于「M-tile 固定 128 行
+  × 每 tile 单专家」。UMMA 的 M 维锁死 128，但 <em>N 维可以 32/64/128/256</em>。把操作数
+  对调——<strong>权重当 M 侧</strong>（128 行 tile 铺 model-N=1024/2048，天然整除）、
+  <strong>token 当 N 侧</strong>（tile N=32 起步）——粒度立刻从 128 行/专家 降到 32 列/专家。
+  更关键的是它直击本日志确立的楼层：</p>
+  <div class="tablewrap"><table>
+    <tr><th>每 k-block 交付（decode, gate_up）</th><th class="num">现行（正向）</th><th class="num">Swap-AB</th></tr>
+    <tr><td>M 侧操作数</td><td class="num">A/BF16 32 KB（~97% 是废行）</td><td class="num">W/FP4 8 KB + SF</td></tr>
+    <tr><td>N 侧操作数</td><td class="num">W/FP4 16 KB</td><td class="num">A/BF16 8 KB（tile N=32）</td></tr>
+    <tr><td><strong>合计</strong></td><td class="num"><strong>~50 KB</strong></td><td class="num"><strong>~17 KB</strong></td></tr>
+  </table></div>
+  <p>按 L2 交付楼层模型（每 SM 每 k-block ~1.0–1.2 µs 中交付占 0.6–0.8 µs），交付减 3×
+  预期把 decode gate_up 从 24.6 µs 压到 <strong>~12–16 µs</strong>，与 MXFP8 链持平同时保住
+  0.9954 精度。tile 数（gate_up：8/专家 vs 现在 4/专家）仍在单 wave 内，不受罚。</p>
+  <p><strong>实施清单</strong>（设备侧对称性已核实，DeepGEMM 有 swap-AB epilogue 参考实现）：</p>
+  <ol>
+    <li>主循环操作数对调：packed-FP4 权重走现在 A0 的槽位（免 transform，TMA 直达）+
+      权重 SF 走 SFA 槽（<em>128×4 atom 布局两侧完全对称，现有 quantize_weight_nvfp4
+      产物可直接复用</em>）；BF16 激活 TMA 进小 B-tile，transform 改写 B 槽 +
+      SFB atom（不足 128 行的 SF 尾部 memset 归零）。</li>
+    <li>Epilogue 转置存储：accumulator 是 (128 权重行 × N_tile token 列)，D 要
+      (tokens, model_N)——移植 DeepGEMM <code>sm100_store_cd_swap_ab.cuh</code>
+      （144 行，warpgroup 协作转置 + 128B swizzle）。</li>
+    <li>Host：<code>tune_swap_ab</code> 开关 + m_indices 对齐降到 N_tile（32）；
+      按 M 大小自动分派（M ≤ ~512/专家 → swap）。</li>
+    <li>bring-up 按本日志既定纪律：先 one-hot 探针定位布局，再 cosine 门槛，
+      新 cache key 由 P1 头文件哈希自动保障。</li>
+  </ol>
+  <h3>Swap-AB · 已实现并验证 —— decode 追平/反超 MXFP8 链</h3>
+  <p><strong>实现</strong>（新增 ~700 行）：<code>impls/sm100_bf16_dual_nvfp4_gemm_swap_ab.cuh</code>
+  （操作数对调的主循环：权重走 A 槽免 transform、weight-SF 复用现有 atom 布局直接喂 SFA、
+  激活 transform 改写 B 槽）+ <code>epilogue/sm100_store_cd_swap_ab.cuh</code>
+  （DeepGEMM 移植：16dp256b TMEM load + <code>stmatrix.trans</code> 转置存储）+
+  host 分派（<code>tune_swap_ab=1</code>，m_indices 对齐降到 32）。SMEM/stage 仅 ~23 KB
+  → 默认 6 级流水。</p>
+  <p><strong>bring-up</strong>：首测 cosine 0.03，one-hot 探针显示输出为"混合"而非置换——
+  又是 TMEM 子分区映射（epilogue 从绝对 warp 7 起，子分区 3,0,1,2 旋转，D 的 model 列按
+  32 组置换）。用第 0 步同款修复（<code>warp_idx % 4</code> 决定 SMEM 落位）后
+  <strong>8/8 全过</strong>（one-hot 0.999998；ragged/decode 形/双 policy 全绿）。</p>
+  <p><strong>调优扫描</strong>（block_t × stages × 三工况）确定分派规则：
+  <strong>行/专家 ≲ 32（decode）→ swap bt32；更大 → normal</strong>（2k prefill 处
+  normal 已反超，交叉点 ~32–64 行/专家）。</p>
+  <p><strong>实测（采样路由，与大表同口径）</strong>：</p>
+  <div class="tablewrap"><table>
+    <tr><th>decode 工况</th><th class="num">normal（改进前）</th><th class="num">dual_swap bt32</th>
+        <th class="num">mxfp8_mxfp4</th><th>判定</th></tr>
+    <tr><td>gate_up 16 tok</td><td class="num">24.56 µs</td><td class="num"><strong>12.33 µs</strong></td>
+        <td class="num">12.33 µs</td><td class="good">打平</td></tr>
+    <tr><td>gate_up 32 tok</td><td class="num">24.61 µs</td><td class="num"><strong>12.34 µs</strong></td>
+        <td class="num">12.40 µs</td><td class="good">打平</td></tr>
+    <tr><td>gate_up 128 tok</td><td class="num">24.64 µs</td><td class="num">22.51 µs</td>
+        <td class="num">18.46 µs</td><td>落后 ~18%</td></tr>
+    <tr><td>down 16 tok</td><td class="num">10.29 µs</td><td class="num"><strong>6.19 µs</strong></td>
+        <td class="num">8.54 µs</td><td class="good">反超 28%</td></tr>
+    <tr><td>down 32 tok</td><td class="num">10.28 µs</td><td class="num"><strong>8.23 µs</strong></td>
+        <td class="num">12.32 µs</td><td class="good">反超 33%</td></tr>
+    <tr><td>down 128 tok</td><td class="num">16.42 µs</td><td class="num"><strong>12.34 µs</strong></td>
+        <td class="num">16.4 µs†</td><td class="good">反超 25%</td></tr>
+  </table></div>
+  <p><strong>decode 单层（gate_up+down, 16 tok）：dual 18.5 µs vs mxfp8 20.9 µs——
+  <span class="good">以 0.9954 vs 0.9544 的精度优势同时赢下速度</span></strong>（×40 层：
+  0.74 ms vs 0.84 ms）。swap 精度与 normal 完全一致（0.99540±，全部工况）。
+  prefill 侧 swap 如预期不适用（normal + K≥1024 旋钮仍是最优），mxfp8 在大 prefill
+  维持 1.2–1.5× 领先——那是 1 B vs 2 B 交付的结构差，剩余手段为 cluster multicast。
+  <span class="muted">† mxfp8 down@128tok 本次实测 67.1 µs 为孤立异常（此前多次 16.4），
+  按历史值记。</span></p>
+
+  <h3>持续优化轮次 2–3（目标：全点位逼近 mxfp8）</h3>
+  <ul>
+    <li><span class="tag done">轮次 2</span><strong>swap stages/warps 扫描</strong>：tw4/s8 全面
+      最优（tw2 掉 30%——transform 并行度在 32 行小 tile 上反而关键），decode128 gate_up
+      22.5→20.5 µs（+8.8%）。s8 采纳为 bk128 默认。</li>
+    <li><span class="tag done">轮次 3</span><strong>swap + BLOCK_K=256</strong>：k-block 数减半 =
+      同步链跳数减半。正确性全过；decode128 gate_up 20.5→<strong>18.5 µs（再 +10%，
+      与 mxfp8 的 18.46 打平）</strong>；其余点位持平或微升。K%256==0 时自动启用
+      （bk256/s4 默认）。</li>
+  </ul>
+  <div class="tablewrap"><table>
+    <tr><th>decode 终局（轮次 3 后）</th><th class="num">dual_swap</th><th class="num">mxfp8</th><th>判定</th></tr>
+    <tr><td>gate_up 16/32/128 tok</td><td class="num">12.31 / 12.33 / 18.5</td>
+        <td class="num">12.33 / 12.40 / 18.46</td><td class="good">三档全部打平</td></tr>
+    <tr><td>down 16/32/128 tok</td><td class="num">6.18 / 8.22 / 12.31</td>
+        <td class="num">8.54 / 12.32 / ~16.4</td><td class="good">三档反超 25–33%</td></tr>
+  </table></div>
+  <p><strong>目标状态：decode 全点位「接近 mxfp8」已达成</strong>（gate_up 打平、down 反超，
+  精度优势 10×）。未闭合的只剩大 prefill 的 1.2–1.5×（结构性 1 B vs 2 B 交付），
+  对应最后一张牌 cluster + TMA multicast。</p>
+
+  <h3>持续优化轮次 4a–7（目标循环：10 轮无提升收敛）</h3>
+  <div class="tablewrap"><table>
+    <tr><th>轮次</th><th>假设与改动</th><th class="num">实测</th><th>判定 / 计数</th></tr>
+    <tr><td>4a</td><td>cluster 共驻（无 multicast），配对 tile 落同 GPC 改善 L2 局部性</td>
+        <td class="num">prefill 全点位 ±0.3%</td>
+        <td><span class="tag dead">零收益，计数 1</span> 副产品：修复 4 处 cluster-不安全的
+        <code>arrive(0u)</code>（真 cluster 下死锁）</td></tr>
+    <tr><td>5</td><td><strong>direct-global-A</strong>：transform 直接 LDG 读 BF16，砍掉
+        32 KB/k-block 的 TMA 入口（按交付模型应为 prefill 最大杠杆）</td>
+        <td class="num">正确性 5/5；性能 −8% ~ −20%</td>
+        <td><span class="tag dead">证伪，计数 2</span>：LDG 延迟在 transform 里藏不住，
+        TMA 的 2-3 stage 预取就是该访问模式的优解。保留为 opt-in 旋钮。
+        另：细读参照确认 DeepGEMM 的 SM100 multicast 实为 2SM UMMA 配对、不做 TMA 去重
+        ——对入口字节为零，2SM 移植路线撤销</td></tr>
+    <tr><td>6</td><td>批量扫尾：epilogue 线程 256 / num_sms 粗扫 / swap bt64+bk256 /
+        swap 深 stages</td>
+        <td class="num">−0.2% / 噪声 / −50~72% / 全平</td>
+        <td><span class="tag dead">零收益，计数 3</span></td></tr>
+    <tr><td>7</td><td><strong>wave-tail 均衡</strong>：把 grid 裁到 tiles 均分整数波
+        （高精度 A/B，spread ≤ 0.16 µs）</td>
+        <td class="num">gate_up 16k：sms144 82.37 vs 83.78（<strong>+1.7%</strong>）；
+        8k：sms120 +0.8%；down 无效且有 −20% 悬崖（16k@sms128）</td>
+        <td><span class="tag done">小幅有效，计数归零</span>。不做默认（悬崖风险），
+        以 <code>set_num_sms(ceil(tiles/波数))</code> 规则记录，per-shape 自选</td></tr>
+  </table></div>
+  <h3>轮次 8–13</h3>
+  <div class="tablewrap"><table>
+    <tr><th>轮次</th><th>假设</th><th class="num">实测</th><th>判定</th></tr>
+    <tr><td>8</td><td>L2 权重驻留窗口（persisting carve-out）</td>
+        <td class="num">decode ±0；prefill −30~−61%（挤压普通 L2）</td><td><span class="tag dead">证伪</span></td></tr>
+    <tr><td>9</td><td>PDL 关闭</td><td class="num">−0.1~−0.2%</td><td><span class="tag dead">零</span></td></tr>
+    <tr><td>10</td><td>调度器 L2 分组 8/16/auto</td><td class="num">全点位 ≤0.2%</td><td><span class="tag dead">零</span></td></tr>
+    <tr><td>11</td><td>swap decode + wave 均衡 sms</td><td class="num">全平</td><td><span class="tag dead">零</span></td></tr>
+    <tr><td>12</td><td>swap 浅 stages（prologue 假说）</td><td class="num">s2=s3=s4 全平</td><td><span class="tag dead">零</span></td></tr>
+    <tr><td>13</td><td><strong>swap bk256 + transform warps 8</strong>：bk256 把 transform
+        每步工作量翻倍、重新推上关键路径，tw8 砍半</td>
+        <td class="num">gate_up d16 12.30→<strong>10.26（+16.6%）</strong>；
+        d128 18.45→<strong>16.42（+11%）</strong>；down d128 12.30→<strong>10.32（+16%）</strong></td>
+        <td><span class="tag done">命中，采纳为默认（bk256→tw8），计数归零</span></td></tr>
+  </table></div>
+
+  <h3>decode 终局 v2（轮次 13 后，全默认、零旋钮）</h3>
+  <div class="tablewrap"><table>
+    <tr><th>decode</th><th class="num">dual_swap</th><th class="num">mxfp8_mxfp4</th><th>判定</th></tr>
+    <tr><td>gate_up 16 / 128 tok</td><td class="num"><strong>10.30 / 16.44</strong></td>
+        <td class="num">12.33 / 18.46</td><td class="good">反超 16% / 11%</td></tr>
+    <tr><td>down 16 / 128 tok</td><td class="num"><strong>6.19 / 10.90</strong></td>
+        <td class="num">8.54 / ~16.4</td><td class="good">反超 28% / 34%</td></tr>
+  </table></div>
+  <p><strong>decode 单层（16 tok）：dual 16.5 µs vs mxfp8 20.9 µs（快 27%），×40 层 ≈
+  0.66 vs 0.84 ms——目标「接近 mxfp8」在 decode 侧全点位反超达成，且精度 0.9954 vs
+  0.9544。</strong>正确性全程 8/8 + normal 回归 PASS。</p>
+  <h3>轮次 14–23 · 连续十轮零提升，循环收敛</h3>
+  <div class="tablewrap"><table>
+    <tr><th>轮次</th><th>假设 / 检验</th><th>结果</th></tr>
+    <tr><td>14</td><td>normal prefill transform 粒度复查</td><td>零（并发现旋钮联动坑：显式
+      warps 会关掉 cd64 启发式，−13~20%——已记录为使用警示）</td></tr>
+    <tr><td>15</td><td>swap tw8 下 stages 细扫</td><td>零（bk256 SMEM 上限使 s≥5 钳到 s4）</td></tr>
+    <tr><td>16</td><td>全套基准复测</td><td>逐点复现（±0.05 µs），零</td></tr>
+    <tr><td>17</td><td>路由种子鲁棒性（seed 1/2/3）</td><td>±0.03 µs，调优无过拟合，零</td></tr>
+    <tr><td>18</td><td>residual_amax 新默认代价</td><td>+10~20%（精度模式选型数据），无速度增益</td></tr>
+    <tr><td>19/20</td><td>EP=16 / EP=4 角落</td><td>缩放一致（decode 楼层同、prefill 线性），零</td></tr>
+    <tr><td>21</td><td>最终默认全表终测</td><td>逐点复现，零</td></tr>
+    <tr><td>22</td><td>跨 GPU（GPU3）复现</td><td>与 GPU2 全点位一致（±0.08），零</td></tr>
+    <tr><td>23</td><td>eager vs graph 开销</td><td>eager 连发快 1.5–2.2 µs（PDL 重叠相邻
+      launch 的 prologue）——测量学洞见，非内核增益，零</td></tr>
+  </table></div>
+
+  <h3>轮次 24（收敛后追加）· 设计图对照：A0/A1 细粒度斜切</h3>
+  <p>对照算法图（Algorithm 2 流水线）逐 lane 核对：稳态语义全部一致且实现更深
+  （d=3 vs 图示 d=2、专职 epilogue warpgroup、w16 prefill），唯一未实现的排布差异是
+  <strong>「pack A0 即发 MMA0、残差遍与 MMA0 重叠」的 stage 内斜切</strong>。
+  本轮以 <code>tune_split_transform</code> 旗标完整实现（A0/SFA0 就绪即 arrive 独立
+  barrier + MMA 两段式发射 + phase1 从寄存器保留 q0/sf 重建残差，仅重读 x）：</p>
+  <div class="tablewrap"><table>
+    <tr><th></th><th class="num">merged（现行）</th><th class="num">split（图示排布）</th><th class="num">Δ</th></tr>
+    <tr><td>gate_up p2k/8k/16k</td><td class="num">24.60 / 63.47 / 83.56</td>
+        <td class="num">26.63 / 67.57 / 87.36</td><td class="num bad">−8.3 / −6.5 / −4.6%</td></tr>
+    <tr><td>down p2k/8k/16k</td><td class="num">16.39 / 32.80 / 53.24</td>
+        <td class="num">16.54 / 34.85 / 55.23</td><td class="num bad">−0.9 / −6.2 / −3.7%</td></tr>
+  </table></div>
+  <p>正确性 4/4（0.999926/0.999961，含一次 split 版 residual_amax 的绝对域尺度 bug
+  即时修复）。<strong>结论：图示斜切被证伪</strong>——stage 内重叠不改稳态吞吐
+  （= max(TMA, transform, MMA)），而 phase1 的 x 重读与双倍 barrier 流量是实付成本；
+  现行合并 barrier 排布是更优设计。旗标保留为 opt-in 负结果档案。
+  <em>至此实现与设计图的关系完全闭环：三处有意超越（更深流水/专职 epilogue/实测
+  warp 数），一处经实测否决（斜切）。</em></p>
+
+  <h3>数学层实验（2026-08-01 上午）· Algorithm 1 的自由参数</h3>
+  <p>对 transform 的数学结构做了系统检查（中间精度、两遍间基数、s1 码域整数化、
+  残差位模式直推），两个可测项：</p>
+  <div class="tablewrap"><table>
+    <tr><th>假设</th><th>结果</th></tr>
+    <tr><td><strong>残差基数 ×8 → ×4</strong>：E2M1 网格 [4,6] 段半间隙=1，×8 残差最大到
+      8&gt;6，实测 6% block 截断；×4 永不截断但小残差分辨率减半。指令数完全相同。</td>
+      <td><span class="tag dead">证伪</span>：div4 0.999903 vs div8 0.999926
+      （同速 24.60 µs）——高斯激活下截断代价 &lt; 分辨率代价，<strong>×8 本来就是对的</strong>。
+      <code>derived_div4</code> 保留为 policy（真实离群值分布下可能反转）。</td></tr>
+    <tr><td><strong>bf16x2 SIMD 热循环</strong>：u 最终量化到 E2M1（1 位尾数），bf16
+      中间（8 位尾数）留 7 位余量，数学上安全；amax/mul 链可用 HMAX2/HMUL2 打包，
+      transform vector-ALU 约省 25%。</td>
+      <td><span class="tag dead">实现前被测量否决</span>：两遍归因矩阵（下）证明当前默认下
+      transform 已不在任何点位的关键路径（dual==single at tw8），ALU 缩减无对象。</td></tr>
+  </table></div>
+
+  <h3>两遍归因 · 第一个 vs 第二个 NVFP4 pass 谁耗时（2026-08-01）</h3>
+  <div class="tablewrap"><table>
+    <tr><th>swap decode16 gate_up（bk256）</th><th class="num">tw2</th><th class="num">tw4</th><th class="num">tw8（默认）</th></tr>
+    <tr><td>dual</td><td class="num">16.38 µs</td><td class="num">12.29</td><td class="num">10.26</td></tr>
+    <tr><td>single（无第二遍）</td><td class="num">12.29 µs</td><td class="num">10.25</td><td class="num">10.25</td></tr>
+    <tr><td><strong>第二遍边际成本</strong></td><td class="num">+4.09 µs</td><td class="num">+2.04</td>
+        <td class="num good"><strong>+0.01</strong></td></tr>
+  </table></div>
+  <ul>
+    <li><strong>计算量</strong>：两遍大致相当、第二遍略重——第一遍 tw4 饱和，加第二遍需 tw8；
+      静态清点第二遍在慢速 CVT 管线约 2.4×（重头是 dec(q0) 的 cvt 往返）。</li>
+    <li><strong>部署默认下第二遍已被完全藏掉</strong>：decode 上 dual==single（10.26 vs
+      10.25）——双遍精度溢价免费；down 自 tw4 起即如此（6.16 全平）。R13 的 +16.6%
+      本质就是把第二遍 transform 从关键路径解放。</li>
+    <li><strong>第二遍的剩余成本只在 prefill 且在 MMA 侧</strong>：8k dual 63.52 vs single
+      49.16（+14.4 µs, 23%）＝第二条 UMMA 的张量核执行与发射——两遍矩阵乘的算法代价，
+      非 transform 可优化。</li>
+  </ul>
+
+  <h3>循环终局宣告</h3>
+  <blockquote>
+    <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
+    <strong>目标结算（vs mxfp8_mxfp4，精度 0.9954 vs 0.9544 恒定）：</strong><br>
+    · decode 全点位<strong>反超</strong>：gate_up 10.26/10.26/16.41 vs 12.33/12.40/18.46；
+      down 6.17/8.21/11.0 vs 8.54/12.32/16.4——单层 16.4 vs 20.9 µs（快 27%）<br>
+    · prefill 落后 1.2–1.5×（8k gate_up 63.5 vs 37.0）：经 direct-A 与 2SM 两次对照证伪，
+      确认为 1 B vs 2 B 激活交付的<strong>算法层选择</strong>，非内核可解<br><br>
+    <strong>全程净收益</strong>（相对本轮优化前）：decode gate_up 2.4×（24.6→10.26）、
+    down 1.7×（10.3→6.17）、多 wave prefill +8%；外加正确性从 cosine≈0 修到 0.9999。
+    最终默认：normal→K≥1024 自动 cd64+w16；swap→K%256==0 自动 bk256/s4/tw8。
+    有效轮次 5（1/2/3/7/13），零/负轮次 15，全部留档可复现。
+  </blockquote>
+
+  <h3>轮次 4（存档）· 2-SM UMMA + multicast 设计（已被轮次 5 的分析撤销）</h3>
+  <p><strong>设计定型</strong>（读 DeepGEMM sm100_bf16 的 kNumMulticast=2 路径后）：SM100 的
+  正确形态不是"两个独立 CTA 共享 TMA 多播"，而是 <strong>cta_group::2 的 2-SM UMMA</strong>：
+  cluster 内两个 CTA 组成一次 UMMA_M=256 的执行——A（激活）各持自己的 128 行（transform
+  各自照旧），W/SFB 一次多播进两个 SMEM。每 SM 每 k-block 交付 50→41 KB（−18%），
+  MMA 发射数减半，tensor 利用率随 M=256 上升。要点：<code>Allocator2Sm</code>、
+  leader-only tcgen05 发射、barrier 到达数 ×2（<code>full_barriers.init(2)</code> 等）、
+  scheduler cluster 化（N 对拆分）、epilogue 各 SM 排各自 128 行（现有 epilogue 不变）。</p>
+  <p><strong>已落地</strong>：JIT 启动管道的 cluster 维度支持
+  （<code>LaunchConfig::cluster_dim</code> → <code>CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION</code>）。
+  <span class="tag run">进行中</span>内核侧（impl 模板 kNumMulticast 化 + barrier 纪律 +
+  调度器）为下一工作块；预期 prefill 收益 ~10–18%（交付分量），把 8k gate_up 的
+  63→~53–57 µs，与 mxfp8 的 37 µs 之间剩余差距归于 1 B vs 2 B 的算法层选择。</p>
+
+  <h3>解读（prefill）</h3>
+  <ul>
+    <li><strong>速度格局与 L2 交付模型一致</strong>：MXFP8 链路每元素只送 1 B 激活进 SM
+      （我们送 2 B BF16），交付楼层天然减半；即便算上 36.5 µs 的独立量化 kernel
+      （32k tokens, gate_up 档），两 kernel 链在深 K 上仍快 1.4–1.6×。down（K=512）上
+      量化开销占比升高，优势缩到 1.0–1.2×。</li>
+    <li><strong>精度格局是 10 倍的差距</strong>：同为 4-bit 权重，NVFP4（E4M3 连续 scale，
+      block 16）保住 0.9954，MXFP4（UE8M0 只有 2 的幂，block 32）掉到 0.9544。
+      dual 的第二遍激活 MMA 把 single 的 0.0090 误差再压一半到 0.0046。</li>
+    <li><strong>结论保持仓库文档的判断</strong>：读两列。要吞吐、能吃 0.954 精度 →
+      MXFP8×MXFP4;要 0.995 级精度的 4-bit 权重路径 → dual-NVFP4，代价是深 K 多 wave 下
+      ~1.5× 时延。<span class="muted">（权重为 randn×0.5 合成分布；真实 LLM 权重的绝对
+      cosine 会不同，但两种 scale 格式的相对差距是结构性的。）</span></li>
+  </ul>
+</div>
+
+<h2 id="log">实验记录（持续追加）</h2>
+
+<div class="card">
+  <h3>O1 · CD swizzle 64B → 3-stage 主循环</h3>
+  <p><strong>假设</strong>：SMEM 是 stage 数的唯一约束（68 KB/stage）。把 epilogue 暂存从
+  32 KB 减到 16 KB（swizzle_cd 128→64），3×68+16 ≈ 220 KB &lt; 227 KB，可容第 3 个 stage，
+  加深 TMA↔transform↔MMA 重叠。</p>
+  <p><strong>改动</strong>：host 端新增 <code>tune_swizzle_cd</code> 旋钮
+  （<code>api.hpp</code> / <code>sm100_bf16_dual_nvfp4_gemm.hpp</code>），内核模板本就参数化，
+  零设备代码改动；<code>compute_stages</code> 自动取到 3。</p>
+  <p><strong>正确性</strong>：<span class="good">6/6 PASS</span>（两种 scale 策略 × 三 shape，cosine 0.999925–0.999961）。</p>
+  <p><strong>实测</strong>：</p>
+  <div class="tablewrap"><table>
+    <tr><th>shape</th><th class="num">基线 (cd128, 2st)</th><th class="num">cd64 + 3st</th><th class="num">Δ</th><th class="num">cd64 + 2st（对照）</th></tr>
+    <tr><td>E=4 M/exp=1024 N=1024 K=2048（0.86 wave）</td><td class="num">24.64 µs</td><td class="num">24.63 µs</td><td class="num">+0.0%</td><td class="num">26.66 µs（−8.2%）</td></tr>
+    <tr><td>E=4 M/exp=1024 N=2048 K=512</td><td class="num">16.43 µs</td><td class="num">16.43 µs</td><td class="num">+0.0%</td><td class="num">17.91 µs（−9.0%）</td></tr>
+    <tr><td>E=4 M/exp=2048 N=1024 K=2048（1.7 waves）</td><td class="num">47.07 µs</td><td class="num"><strong>44.99 µs</strong></td><td class="num good">+4.4%</td><td class="num">48.63 µs（−3.3%）</td></tr>
+    <tr><td>E=4 M/exp=256 N=1024 K=2048</td><td class="num">24.63 µs</td><td class="num">24.62 µs</td><td class="num">+0.1%</td><td class="num">26.66 µs（−8.2%）</td></tr>
+  </table></div>
+  <p><strong>结论</strong>：<span class="good">多 wave shape +4.4%</span>；亚 wave 严格持平——
+  与 E1/E2 的判断一致：亚 wave 时延卡在每 K-block 的 transform→MMA 依赖链上，加 stage
+  无法缩短依赖链本身。对照组证明 cd64 单独用（TMA store 翻倍）代价 −8~9%，收益全部来自第 3 个
+  stage。<strong>处置</strong>：保留旋钮，默认不变；M ≥ 2 waves 的负载建议开启
+  <code>tune_swizzle_cd=64</code>。</p>
+</div>
+
+<div class="card">
+  <h3>P1 · JIT 缓存键纳入头文件哈希（流程）</h3>
+  <p><strong>问题</strong>：cache key = hash(生成的 stub + flags + nvcc 版本)，不含被
+  include 的设备头文件。开发循环中改 <code>.cuh</code> → JIT 静默命中旧 cubin →
+  「代码改了，行为没变」，一度导出自相矛盾的结论（swizzle 公式 A/B 测试完全同结果）。</p>
+  <p><strong>改动</strong>：<code>init()</code> 时对 include 根下 <code>nvfp4_gemm/</code>
+  全部头文件做内容哈希（XOR 折叠，遍历序无关），并入 signature。CUTLASS/cute 头文件由
+  submodule 钉死，不纳入（~2300 个文件的哈希代价大于收益）。</p>
+  <p><strong>验证</strong>：<span class="good">生效</span>——同一 GEMM，改头文件注释前后 cache
+  条目从 <code>…4488236825570666266</code> 变为 <code>…9309058194617730124</code>，
+  不再静默复用。</p>
+</div>
+
+<div class="card">
+  <h3>O4a · transform 并行度 ×2（16 warps）—— 负结果，但排除了一整条路线</h3>
+  <p><strong>假设</strong>：E1/E3 曾指向 transform 在关键路径（多一次规约 → +2 µs 全额可见）。
+  当前结构上限 8 warps：每线程恰好一个 64 元素 SF atom。把任务粒度降到半 atom
+  （32 元素/线程，SF 词由两线程各写一个 u16），16 warps 合法，transform 时延应减半。</p>
+  <p><strong>改动</strong>：<code>transform_a_tile</code> 重构为 slot 制
+  （<code>kBlocksPerSlot ∈ {4,2}</code>）；新增 <code>st.shared.u16</code>；
+  impl/host 侧放宽整除断言。8-warp 路径生成代码与原版语义一致。
+  另：16 warps 时非 epilogue warp 数 = 19，epilogue warp 落在子分区 3,0,1,2——
+  <em>只有在第 0 步的 subpartition 修复之后这个配置才可能正确</em>。</p>
+  <p><strong>正确性</strong>：<span class="good">8/8 PASS</span>（含与 cd64 组合）。</p>
+  <p><strong>实测</strong>（关键行）：</p>
+  <div class="tablewrap"><table>
+    <tr><th>变体（E=4, M/exp=1024, N=1024, K=2048）</th><th class="num">µs</th><th>解读</th></tr>
+    <tr><td>w8 dual（基线）</td><td class="num">24.64</td><td>—</td></tr>
+    <tr><td>w16 dual</td><td class="num">26.66</td><td class="bad">−8%：多出的 4 个 warp 只添乱</td></tr>
+    <tr><td>w8 single-pass</td><td class="num">20.54</td><td rowspan="2"><strong>完全同速</strong> ⇒ transform 吞吐从来不是瓶颈</td></tr>
+    <tr><td>w16 single-pass</td><td class="num">20.52</td></tr>
+  </table></div>
+  <p><strong>结论</strong>：假设被证伪。transform 计算减半对时延零影响——E3 的 +2 µs 应理解为
+  规约拉长了每 k-block 的<em>依赖链</em>而非占满了吞吐。价值在于<strong>排除了「优化
+  Algorithm 1 指令效率」整条路线</strong>（O4b 不必做）。多 wave 下 w16+cd64 组合仍有
+  +8.2%（43.36 µs），保留为可选旋钮。</p>
+</div>
+
+<div class="card">
+  <h3>O5 · TMA 生产者坐标外提 —— 默认配置 +6.3%（多 wave）</h3>
+  <p><strong>假设</strong>：ncu 显示最大 stall 为 L1TEX scoreboard（46%）。主循环里唯一的同步
+  全局访存是 scheduler 的 <code>grouped_layout[m_block_idx * BLOCK_M]</code>（读
+  <code>m_indices</code> 求 expert 偏移）——TMA 生产者每个 k-block 经它算 B 的 <code>n_idx</code>
+  和 SFB 的 <code>k_idx</code>，且循环体内的 inline-asm 屏障使编译器无法外提 ⇒
+  每 tile ~32 次依赖性全局 load 落在生产者关键路径上。</p>
+  <p><strong>改动</strong>：<code>n_idx</code> / <code>sfb_k_base</code> / <code>m_idx</code>
+  手动提升到 tile 级，K 循环内只做加法。约 10 行，见
+  <code>impls/sm100_bf16_dual_nvfp4_gemm.cuh</code> warp-0 段。</p>
+  <p><strong>实测</strong>：</p>
+  <div class="tablewrap"><table>
+    <tr><th>shape</th><th class="num">O5 前</th><th class="num">O5 后</th><th class="num">Δ</th></tr>
+    <tr><td>E=4 M/exp=1024（0.86 wave，亚 wave）</td><td class="num">24.64 µs</td><td class="num">24.61 µs</td><td class="num">±0</td></tr>
+    <tr><td>E=4 M/exp=2048（1.7 waves）dual</td><td class="num">46.95 µs</td><td class="num"><strong>43.97 µs</strong></td><td class="num good">+6.3%</td></tr>
+    <tr><td>E=4 M/exp=2048 single-pass</td><td class="num">35.58 µs</td><td class="num">34.87 µs</td><td class="num good">+2.0%</td></tr>
+  </table></div>
+  <p><strong>结论</strong>：<span class="good">采纳</span>。零旋钮、纯正收益：多 wave 稳态里
+  生产者是决定 wave 吞吐的资源，摘掉 32 次串行 load 直接抬高稳态；亚 wave 的楼层另有原因（见下）。
+  正确性全量回归 8/8 PASS。</p>
+</div>
+
+<div class="card">
+  <h3>Profile 定论 · 亚 wave 楼层的真身：同步链时延，不是任何吞吐</h3>
+  <p>ncu SpeedOfLight（基线 shape，dual）：</p>
+  <div class="tablewrap"><table>
+    <tr><th>指标</th><th class="num">值</th><th>含义</th></tr>
+    <tr><td>DRAM Throughput</td><td class="num">10.1%</td><td rowspan="4">没有任何一个吞吐维度饱和；
+      ncu 判定 "latency issues"</td></tr>
+    <tr><td>L2 Throughput</td><td class="num">13.2%</td></tr>
+    <tr><td>Compute (SM)</td><td class="num">42.4%</td></tr>
+    <tr><td>Memory Throughput</td><td class="num">24.9%</td></tr>
+    <tr><td>Occupancy</td><td class="num">23.4%（15 warps = 1 block/SM）</td><td>寄存器 + SMEM 双重限制，1 CTA/SM 是设计使然</td></tr>
+    <tr><td>Issued/cycle/scheduler</td><td class="num">0.55</td><td>发射端半闲</td></tr>
+  </table></div>
+  <p>结合 K 扫描外推（single-pass：斜率 1.02 µs/k-block，截距 4.2 µs）和「transform 减半无感、
+  第二遍 MMA 全额计价」两个事实，亚 wave 楼层的模型是：</p>
+  <blockquote>每 k-block 一条串行同步链：TMA 到达 → transform/SFB 转置 →
+  <code>transform_full</code> barrier → 单线程 elect_one 发射 6–8 个 UTCCP + 2–4 个 UMMA
+  （带 tcgen05 fence）→ <code>umma_arrive</code> → stage 回收。约 6 个同步点 ×
+  barrier/fence 往返 + tcgen05 发射串行化 ≈ 1.0–1.2 µs/k-block。
+  管线加深只能隐藏<em>带宽</em>类时延，隐藏不了这条<em>链</em>本身。</blockquote>
+</div>
+
+<div class="card">
+  <h3>Nsight Compute 深度剖析 · 逐项归因</h3>
+  <p>全套 section（SpeedOfLight / ComputeWorkload / MemoryWorkload / Scheduler /
+  WarpState / InstructionStats / LaunchStats / Occupancy）+ 全部 stall 细分
+  metrics，dual 与 single-pass 两个变体对照，shape = E=4, M/exp=1024, N=1024, K=2048。</p>
+
+  <h4>① 宏观：处处不饱和 ⇒ 纯时延型内核</h4>
+  <div class="tablewrap"><table>
+    <tr><th>吞吐维度</th><th class="num">利用率</th><th>判定</th></tr>
+    <tr><td>Compute (SM)</td><td class="num">42.4%</td><td rowspan="5">没有任何维度过 45%——
+      不是 compute-bound，不是 bandwidth-bound；ncu 结论 "latency issues"</td></tr>
+    <tr><td>Memory 总体</td><td class="num">24.9%</td></tr>
+    <tr><td>DRAM</td><td class="num">10.1%</td></tr>
+    <tr><td>L2</td><td class="num">13.2%</td></tr>
+    <tr><td>L1/TEX</td><td class="num">33.0%</td></tr>
+    <tr><td>发射槽占用</td><td class="num">42%（0.55 inst/cyc/scheduler）</td><td>发射端半闲</td></tr>
+    <tr><td>最忙流水线</td><td class="num">ALU 38.8%</td><td>大量低延迟整数指令 = 自旋等待 + 地址计算</td></tr>
+  </table></div>
+  <p>Launch：480 线程/CTA，87 寄存器/线程（上限 136），SMEM 172 KB/CTA，1 CTA/SM，
+  <strong>Waves Per SM = 1</strong>——亚 wave 区名副其实。指令总量 13.6M，
+  其中非融合 FP32 3.4M（transform 的乘加，已证非瓶颈）。</p>
+
+  <h4>② stall 构成（cycles / issued-inst，dual vs single）</h4>
+  <div class="tablewrap"><table>
+    <tr><th>stall 原因</th><th class="num">dual</th><th class="num">single</th><th>解读</th></tr>
+    <tr><td><strong>long_scoreboard</strong>（L1TEX/TMEM 数据回填）</td>
+        <td class="num"><strong>2.98</strong></td><td class="num">5.28</td>
+        <td>占 45%，第一大项。稳态 K 循环内不存在全局 load（O5 后），
+        指向 epilogue <code>tcgen05.ld</code> 与 TMA 生产者的数据等待</td></tr>
+    <tr><td>not_selected</td><td class="num">0.62</td><td class="num">0.53</td><td>有资格未被选中——无害</td></tr>
+    <tr><td>barrier</td><td class="num">0.43</td><td class="num">0.72</td><td>bar.sync 汇合（epilogue NamedBarrier 等）</td></tr>
+    <tr><td>wait（定延迟依赖）</td><td class="num">0.34</td><td class="num">0.57</td><td>ALU/FMA 链</td></tr>
+    <tr><td>math_pipe_throttle</td><td class="num">0.29</td><td class="num">0.32</td><td>FP32 管线排队——transform 有压力但远非主导</td></tr>
+    <tr><td>short_scoreboard（SMEM）</td><td class="num">0.29</td><td class="num">0.55</td><td>transform 的 LDS/STS</td></tr>
+    <tr><td>no_instruction / sleeping / branch</td><td class="num">0.25 / 0.22 / 0.11</td><td class="num">0.40 / 0.31 / —</td>
+        <td>sleeping = mbarrier 自旋里的 nanosleep 退避——同步链的直接证据</td></tr>
+  </table></div>
+  <p class="muted">注：single 列的每发射比值偏高是分母效应（发射更少、时间更短），
+  绝对归因以 dual 为准。</p>
+
+  <h4>③ 决定性交叉验证（profile × 受控实验）</h4>
+  <ul>
+    <li><strong>transform 吞吐</strong>：math_pipe 仅 0.29 cyc/issue，且 O4a（并行度×2）零收益 → <span class="bad">排除</span></li>
+    <li><strong>DRAM/L2 带宽</strong>：10%/13%，且时延与 tile 数无关（E2）→ <span class="bad">排除</span></li>
+    <li><strong>epilogue TMEM 串行等待</strong>：long_scoreboard 第一大项 → 实施 O7
+      （批量发射 + 单次 <code>tcgen05.wait::ld</code> + 提前释放 accumulator）→
+      多 wave +1.8%，<strong>亚 wave 不动</strong> → epilogue 是稳态贡献者、不是亚 wave 楼层</li>
+    <li><strong>固定开销（截距 ~4–5 µs）归属</strong>：O7 后亚 wave 仍 24.6 µs →
+      截距主要在 <em>prologue</em>（TMA 流水填充 + TMEM 分配 + 首块整链延迟），不在 epilogue 尾部</li>
+    <li><strong>稳态斜率（~1.0–1.2 µs/k-block）</strong>：barrier + sleeping + branch ≈ 0.76 cyc/issue
+      的同步开销 + long_scoreboard 中 TMA 到达等待 → 每 k-block 约 6 个同步点的链，
+      与 K 扫描斜率吻合</li>
+  </ul>
+
+  <h4>④ 瓶颈判定（最终）</h4>
+  <blockquote>
+    <strong>时延型内核，双成分楼层：</strong><br>
+    <strong>稳态斜率</strong> = 每 k-block 同步链（TMA 到达 → transform/转置 →
+    transform_full → 单线程 elect_one 串行发射 6–8 UTCCP + 2–4 UMMA（带 tcgen05
+    fence）→ arrive → stage 回收），~1.0–1.2 µs/k-block，管线深度隐藏不了链本身；<br>
+    <strong>固定截距</strong> = prologue 流水填充 ~4–5 µs，亚 wave 下（1 tile/SM）全额暴露。<br>
+    第二遍 MMA 的 +4.1 µs 是把 elect_one 发射链拉长（UTCCP×2 + UMMA×2/k-block）的直接后果，
+    不是张量核吞吐问题——tensor 管线远未饱和。
+  </blockquote>
+
+  <h4>⑤ 优化方案（按 预期收益 ÷ 风险 排序）</h4>
+  <div class="tablewrap"><table>
+    <tr><th>#</th><th>方案</th><th>攻击对象</th><th>预期</th><th>状态</th></tr>
+    <tr><td>1</td><td>坐标外提（O5）</td><td>生产者关键路径上的依赖 load</td><td>—</td>
+        <td><span class="tag done">已落地 +6.3%（多 wave）</span></td></tr>
+    <tr><td>2</td><td>TMEM load 批量化 + 提前 arrive（O7）</td><td>long_scoreboard / accumulator 周转</td><td>—</td>
+        <td><span class="tag done">已落地 +1.8%（多 wave）</span></td></tr>
+    <tr><td>3</td><td>cd64 + 3 stages（O1）/ w16（O4a）</td><td>多 wave 稳态重叠</td><td>—</td>
+        <td><span class="tag done">旋钮可选，合计 +8.2%</span></td></tr>
+    <tr><td>4</td><td><strong>R1 · UTCCP/UMMA 交错发射</strong>：每 atom 的 SF 拷完立即发该
+        atom 的 UMMA（首条 UMMA 只等 3 条 UTCCP 而非 8 条），SFA1 拷贝藏到 pass0 之后</td>
+        <td>elect_one 串行发射链（斜率）</td><td class="num">实测 ±0.0%，所有 shape</td>
+        <td><span class="tag dead">已测证伪 → 回退。硬件本就重叠 UTCCP 排空与 UMMA 执行，
+        发射顺序不在关键路径</span></td></tr>
+    <tr><td>5</td><td><strong>R2 · SFB 转置并入 transform warps</strong>：消灭 warp 2 角色，
+        barrier 到达数 −32</td><td>同步点数（斜率）</td><td class="num">实测亚 wave ±0，
+        多 wave −1~5%</td>
+        <td><span class="tag dead">已测证伪 → 回退。转置原本与 transform 并行、是免费的；
+        合并反而将其串行化</span></td></tr>
+    <tr><td>6</td><td><strong>紧自旋 barrier wait</strong></td><td>sleeping stall（0.22 cyc/issue）</td>
+        <td class="num">—</td><td><span class="tag dead">分析否决：<code>mbarrier.try_wait</code>
+        的硬件挂起不占发射槽，是特性不是浪费；紧自旋会抢其它 warp 的发射带宽</span></td></tr>
+    <tr><td>7</td><td><strong>双 tile 交错</strong>：单 CTA 同时推进两个 M-tile 的 K 循环，
+        互相填链上气泡</td><td>斜率与截距同时</td><td class="num">理论上限 ~2×，
+        实际受 SMEM/TMEM 预算约束</td><td><span class="tag todo">大改，高风险高回报</span></td></tr>
+    <tr><td>8</td><td>prologue 缩短：首 tile 提前 TMA（graph 捕获时预热）、
+        TMEM 分配移出关键路径</td><td>截距（亚 wave 独有）</td><td class="num">~1–2 µs/launch</td>
+        <td><span class="tag todo">待做，中风险</span></td></tr>
+  </table></div>
+</div>
+
+<div class="card">
+  <h3>收尾 · 最终状态与后续路线</h3>
+  <p><strong>已落地（全部通过 8/8 cosine 回归）：</strong></p>
+  <ul>
+    <li>正确性修复：epilogue TMEM 子分区（前提性，severity 最高）</li>
+    <li>O5 坐标外提 + O7 TMEM 批量化：默认配置多 wave <span class="good">+8.0%</span>
+      （46.95→43.17 µs），无任何代价 → 建议合入</li>
+    <li>O1/O4a 旋钮：<code>tune_swizzle_cd=64</code>（多 wave +4.4%）、
+      <code>tune_transform_warps=16</code>（与 cd64 组合再 +2%）→ M ≥ 2 waves 时启用</li>
+    <li>P1 JIT 头文件哈希、P3 传输 md5 校验：流程债清偿</li>
+    <li>P2（基准防污染脚本化）：诊断/确认脚本已固化 median±spread + 指定空闲 GPU 的做法，
+      建议后续并入 <code>benchmarks/</code></li>
+  </ul>
+  <p><strong>亚 wave 楼层（24.6 µs）：终局结论（O9 实验后）</strong></p>
+  <p>「双 tile 交错」的廉价等价实现——<strong>O9 · 2 CTA/SM 共驻</strong>——已实施并测量：
+  瘦身配置（BLOCK_N=128, BLOCK_K=64, 4 transform warps, cd64, 单 epilogue stage）把
+  SMEM 压到 ~107 KB、TMEM 压到 256 列、寄存器留在预算内，296-CTA 网格下两个 CTA 真实共驻
+  且<strong>正确性全过</strong>。但：</p>
+  <div class="tablewrap"><table>
+    <tr><th>shape（E=4, N=1024, K=2048）</th><th class="num">default@148</th><th class="num">slim@148</th><th class="num">slim@296（2 CTA/SM）</th></tr>
+    <tr><td>M/exp=1024</td><td class="num">24.59 µs</td><td class="num">52.57 µs</td><td class="num">53.26 µs（<strong>±0%</strong> vs slim@148）</td></tr>
+    <tr><td>M/exp=2048</td><td class="num">43.05 µs</td><td class="num">100.11 µs</td><td class="num">97.79 µs（+2.3%）</td></tr>
+  </table></div>
+  <p><strong>这是整轮调查最有分辨力的否定</strong>：若每 k-block 的 ~1 µs 是可隐藏的空闲时延
+  （链上气泡），共驻的第二条链应能填进去——它完全没有。可被两条链共享而不加速的，只能是
+  <em>被占用的每 SM 资源</em>。对账：每 k-block 每 SM 搬运 50 KB（A/BF16 32 KB + W 16 KB +
+  SFB 2 KB）；亚 wave 下 128 SM × 50 KB ÷ 1.19 µs ≈ 5.4 TB/s 聚合 L2 读——与 ncu 的
+  「L2 13.2%」（≈5.3 TB/s）严丝合缝。</p>
+  <blockquote><strong>楼层的物理身份：每 SM 的 L2→SMEM 交付通道。</strong>
+  每 k-block 50 KB 中 32 KB 是 BF16 激活——这正是 fused dual-NVFP4 设计自愿支付的代价
+  （每元素 2 B 进 SM，换取不在全局内存物化量化激活）。它解释了全部否定结果：加深管线、
+  加倍 warp、重排发射、共驻 CTA，没有一个能减少要搬的字节。要击穿它只有两类办法：
+  ① 换算法（预量化 A → 放弃本 kernel 的存在前提）；② 提高 A 的复用（更大的 N tile 让同一
+  份 A 服务更宽的输出——BLOCK_N=256 已是 TMEM 上限，除非 UMMA_N 拆分重构）。
+  在本算法与本硬件预算内，24.6 µs 即楼层。</blockquote>
+  <p>剩余可做但收益有限：<strong>prologue 缩短</strong>（~4–5 µs 截距的一部分，攻小 K shape）。
+  O9 的三个旋钮（<code>tune_block_k</code> / <code>tune_epilogue_stages</code> /
+  <code>set_num_sms</code> 超额网格）保留为 API 面——它们已验证正确，只是在此工况下无收益。</p>
+  <p class="muted">全部实验数据、脚本（diag_deep / o1_test / o4_test / confirm / validate）
+  与本页所引 ncu 输出均在 10.251.209.5:/data1/min.yang/nvfp4-cutlass 及容器
+  /home/workcode 下可复现。</p>
+</div>
+
+</main>
+</body>
+</html>

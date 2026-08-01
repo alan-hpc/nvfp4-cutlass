@@ -197,6 +197,65 @@
   这也解释了为什么截图里的公式只有 <span class="mono">s0,b</span>：它已经是在
   <span class="mono">G_A=1</span> 特化之后的真实公式，不是漏掉一次运行时 per-tensor max。</p>
 
+  <h2>真实 checkpoint 对照 · Qwen3.5-35B-A3B NVFP4 逐字段审计（2026-08-01）</h2>
+  <p>以真实 NVFP4 量化模型（<span class="mono">Qwen3.5-35B-A3B</span>，每 expert 每投影）
+  的参数清单为准，逐字段对照上文两层尺度模型在本实现中的落点：</p>
+  <table class="map">
+    <tr><th>checkpoint 字段（shape / dtype）</th><th>对应本实现</th><th>处理时机</th></tr>
+    <tr><td><span class="mono">weight_packed [N, K/2] U8</span></td>
+        <td>kernel 输入 <span class="mono">b</span>（K-major packed E2M1）</td>
+        <td>布局一致，loader 直接按 expert 堆叠</td></tr>
+    <tr><td><span class="mono">weight_scale [N, K/16] F8_E4M3</span></td>
+        <td><span class="mono">sfb</span>，但 kernel 消费的是 UTCCP 的
+            <b>128×4-atom int32 布局</b>（<span class="mono">[E·K/64, N]</span>）</td>
+        <td><b>离线一次性重排</b>（纯 gather，loader 内完成，零运行时成本）</td></tr>
+    <tr><td><span class="mono">weight_global_scale [1] F32</span></td>
+        <td><span class="mono">gw[e]</span>，epilogue 对 accumulator 每元素乘一次</td>
+        <td>离线读取；粒度（每 expert 每投影一个标量）与实现完全一致</td></tr>
+    <tr><td><span class="mono">input_global_scale [1] F32</span>（离线校准）</td>
+        <td><b>设计上不需要加载</b>：本 kernel 按 <span class="mono">constant_amax=2688</span>
+            特化，G<span class="sub">A</span>≡1；E4M3 block scale（≤448）×E2M1（≤6）
+            直接覆盖 |x|≤2688，LLM 激活远在其内</td>
+        <td>不加载、不乘、无指令——该字段的存在本身即证明生产契约是
+            <b>静态离线校准</b>，无人在运行时做 per-tensor amax</td></tr>
+  </table>
+
+  <div class="note">
+    <b>运行时 per-tensor amax 审计（kernel 与 benchmark 双侧，实测核对）：</b>
+    ① kernel 内唯一的 amax 是每 16 元素 block 的（NVFP4 格式定义的一部分，融合在
+    mainloop transform 中）；无任何 per-tensor 归约。
+    ② benchmark 的 timed 区间：dual/single 为单 kernel 调用零预处理；
+    <span class="mono">mxfp8_mxfp4</span> 链含 <span class="mono">mxfp8_quantize</span>
+    ——那是该链路自身的在线成本（比较原则：谁需要转换谁付账），无外部算子预处理混入。
+    ③ 辅助函数 <span class="mono">activation_global_scale()</span> 仅供离线使用，
+    无 timed 路径调用。
+  </div>
+
+  <div class="note" style="border-left-color:#b45309;background:#fdf6ec">
+    <b>gate/up 融合的真实集成差异：</b>checkpoint 将 gate_proj 与 up_proj 分开存储
+    （各 <span class="mono">[512, 1024]</span>），且<b>各自持有独立的
+    weight_global_scale</b>。融合为 N=1024 的 gate_up GEMM（本实现基准所采）时，
+    每 expert 只有一个 <span class="mono">gw</span> 标量，需离线折叠：
+    取共享 <span class="mono">gw′</span>，将
+    <span class="mono">S<span class="sub">W</span>′ = S<span class="sub">W</span> ·
+    (gw<span class="sub">gate|up</span>/gw′)</span> 重量化进 E4M3 block scale
+    （近乎精确）；或退而各跑 N=512 的两个 GEMM（合法但 tile 收窄）。
+    合成权重的基准掩盖了这一步——真实权重 loader 必须处理。
+  </div>
+
+  <div class="note" style="border-left-color:#5b5fc7;background:#f0f1fb">
+    <b>统一流水图的实测裁决（2026-08-01，B300）：</b>下文流水图中
+    「pack A0 即发 MMA<span class="sub">0</span>、残差遍与 MMA<span class="sub">0</span>
+    重叠」的 stage 内细粒度斜切已按图完整实现
+    （独立 A0-ready barrier + MMA 两段式发射，<span class="mono">tune_split_transform</span>），
+    实测 prefill 全点位 <b>−1%～−8%</b>：stage 内重叠不改变稳态吞吐
+    （= max(TMA, transform, MMA)，跨 stage 重叠由 staged buffer 已然提供），
+    而第二相重读 x 与双倍 barrier 流量是实付成本。<b>部署实现保留合并 barrier 排布</b>，
+    并在三处超越图示：流水深度 d=3（图示 d=2）、专职 epilogue warpgroup、
+    prefill 实测选定 16 transform warps。完整数据见
+    <span class="mono">docs/b300-deep-opt-log.html</span>。
+  </div>
+
   <h2>Algorithm 1 · BF16 block → 两遍 NVFP4(MSD 分解,per 16-element block)</h2>
   <div class="algo">
     <div class="algo-title"><span class="no">Algorithm 1</span><span class="cap">Dual-NVFP4 Decomposition of one BF16 block</span></div>
