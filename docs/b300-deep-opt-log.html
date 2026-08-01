@@ -743,6 +743,23 @@
   <strong>尾波的正解由此进一步指向 megafusion</strong>:同核跨层取整 tile,
   没有拆分就没有归并税。</blockquote>
 
+  <h3>当前版本终表 · Prefill/Decode × gate_up/down 全点位(2026-08-01 晚,含 V3+R26-28 全部改动)</h3>
+  <p>Qwen3.5-35B-A3B,EP=8(32 本地专家),top-8 采样路由,graph 中位数;
+  decode 取 swap-AB(生产路径),prefill 取 normal dual。</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位</th><th class="num">dual(本内核)</th><th class="num">mxfp8×mxfp4</th><th class="num">Δ</th><th class="num">cosine(dual vs mxfp8)</th></tr>
+    <tr><td>decode16 gate_up / down</td><td class="num">10.28 / 6.19</td><td class="num">12.32 / 8.25</td><td class="num">−17% / −25%</td><td class="num" rowspan="3">0.9954 vs 0.9546<br>(single 0.9910)</td></tr>
+    <tr><td>decode32 gate_up / down</td><td class="num">10.29 / 8.23</td><td class="num">12.37 / 12.34</td><td class="num">−17% / −33%</td></tr>
+    <tr><td>decode128 gate_up / down</td><td class="num">14.45 / 10.29</td><td class="num">18.46 / 16.41</td><td class="num">−22% / −37%</td></tr>
+    <tr><td>prefill 2k gate_up / down</td><td class="num">20.41 / <strong>14.36</strong></td><td class="num">18.37 / 16.36</td><td class="num">+11% / <strong>−12%</strong></td><td class="num" rowspan="3">同上</td></tr>
+    <tr><td>prefill 8k gate_up / down</td><td class="num">51.81 / 28.75</td><td class="num">38.49 / 26.82</td><td class="num">+35% / +7%</td></tr>
+    <tr><td>prefill 16k gate_up / down</td><td class="num">66.06 / 46.89</td><td class="num">55.28 / 45.11</td><td class="num">+19% / +4%</td></tr>
+  </table></div>
+  <p><strong>层级汇总</strong>(gate_up+down):decode128 <b>24.7 vs 34.9(快 29%)</b>;
+  prefill 2k <b>34.8 vs 34.7(打平)</b>;8k 80.6 vs 65.3(+23%);16k 112.9 vs 100.4(+13%)。
+  精度恒定 10×:0.9954 vs 0.9546。剩余差距集中于 8k gate_up 一点(1.35×,
+  波数 2.16 恰在 wave-ceil 最不利区间 + 2B 激活交付);down 全点位已达/超平价。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
