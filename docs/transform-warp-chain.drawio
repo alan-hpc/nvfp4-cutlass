@@ -1,0 +1,106 @@
+<mxfile host="app.diagrams.net" modified="2026-08-02T00:00:00.000Z" agent="nvfp4-cutlass" version="24.0.0">
+  <diagram name="transform-warp-chain" id="tfm-chain-r32">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Transform warp 依赖链(每 kb 每 warp,w16:1 slot = 2 block)&lt;br&gt;&lt;font style=&quot;font-size:12px&quot;&gt;B300 · V3 packed + 树形 amax + 整数化后 · 链总长 ~0.4–0.5 µs · 每 kb 暴露 ~0.26 µs(R30/R31/R32 实测)&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="160" y="20" width="880" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg0" value="执行管线" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="120" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1" value="同步 / mbarrier" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="40" y="126" width="150" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="LSU(共享内存)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="40" y="160" width="150" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" value="ALU / FMA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="40" y="194" width="150" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4" value="CVT(转换管线)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="40" y="228" width="150" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="leg5" value="SFU(MUFU)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="40" y="262" width="150" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ctx" value="同一时刻在本 CTA 的其它 warp 上并行:&lt;br&gt;&lt;br&gt;· MMA warp 正在消费 kb−1&lt;br&gt;(UMMA 张量核异步执行)&lt;br&gt;&lt;br&gt;· TMA warp 正在预取 kb+1&lt;br&gt;(A/W/SFB 三路拷贝)&lt;br&gt;&lt;br&gt;· epilogue warp 组在等 tmem_full&lt;br&gt;(probe5 证明其发射口空闲)&lt;br&gt;&lt;br&gt;流水线遮盖了链的大部分,&lt;br&gt;暴露部分 ≈ 0.26 µs/kb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=11;align=left;verticalAlign=top;spacing=8;dashed=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="330" width="220" height="260" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n1" value="mbarrier full.wait 唤醒&lt;br&gt;&lt;b&gt;~50–80 ns&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="110" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="LDS.128 ×4(swizzled,批量前置发射)&lt;br&gt;&lt;b&gt;~40–60 ns&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="186" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="amax 树 ×2 block 交错(VHMNMX)&lt;br&gt;&lt;b&gt;~50–60 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;✓ R31:深度 7→3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="262" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="×1/6 FMUL + floor FMNMX&lt;br&gt;&lt;b&gt;~15 ns&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="338" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="CVT f32→e4m3(s0 编码)&lt;br&gt;&lt;b&gt;~20–25 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;❄ 舍入契约,不可替代" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="414" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="s0 整数解码 (code&amp;lt;&amp;lt;20)+0x3C000000&lt;br&gt;&lt;b&gt;~7 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;✓ V3:原 2×CVT 已整数化" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="490" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" value="MUFU.RCP&lt;br&gt;&lt;b&gt;~20–25 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;✓ R32 消融:被 ILP 覆盖,全点位 ≤0.2 µs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="566" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" value="CVT f32→bf16x2 打包(inv 广播)&lt;br&gt;&lt;b&gt;~15 ns&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="642" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n9" value="pass-1:HMUL2 ×4 → cvt_e2m1x8_bf16x2&lt;br&gt;&lt;b&gt;~50–70 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;✓ V3:4 对/条 asm 向量打包" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="718" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" value="pass-2:dec(cvt) → HSUB2 → 指数+3(IADD)→ cvt_e2m1x8&lt;br&gt;&lt;b&gt;~60–80 ns&lt;/b&gt;&amp;nbsp;&amp;nbsp;✓ V3:×8 = 指数加法,Sterbenz 精确" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="794" width="320" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n11" value="ST.128 ×2(A0/A1)+ SF u16&lt;br&gt;fire-and-forget,不在关键链上" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;dashed=1" vertex="1" parent="1">
+          <mxGeometry x="800" y="794" width="280" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" value="fence_view_async_shared + arrive → MMA 唤醒&lt;br&gt;&lt;b&gt;~60–100 ns&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="400" y="870" width="320" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n1" target="n2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n2" target="n3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n3" target="n4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n4" target="n5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n5" target="n6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n6" target="n7"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n7" target="n8"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n8" target="n9"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n9" target="n10"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n10" target="n12"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="n10" target="n11"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="brace_top" value="" style="shape=curlyBracket;whiteSpace=wrap;html=1;rounded=1;flipH=1;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="740" y="110" width="20" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="brace_bot" value="" style="shape=curlyBracket;whiteSpace=wrap;html=1;rounded=1;flipH=1;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="740" y="870" width="20" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="note_sync" value="&lt;b&gt;同步两端 ≈ 0.11–0.18 µs&lt;/b&gt;&lt;br&gt;≈ 暴露链之半,mbarrier 唤醒延迟&lt;br&gt;属硬件属性——fused 流水线的定义性成本" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8f8;strokeColor=#b85450;fontSize=11;align=left;spacing=6" vertex="1" parent="1">
+          <mxGeometry x="800" y="120" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="note_mid" value="&lt;b&gt;中段计算 ≈ 0.25 µs&lt;/b&gt;&lt;br&gt;V3 / 树形 amax / 整数化后每环节仅 1–2 条指令&lt;br&gt;——数学侧已萃干(R32)&lt;br&gt;&lt;br&gt;唯一契约环节:s0 编码 CVT(舍入须与参考一致)&lt;br&gt;s1 编码不在链上(无 in-loop 消费者)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbfbff;strokeColor=#9673a6;fontSize=11;align=left;spacing=6" vertex="1" parent="1">
+          <mxGeometry x="800" y="380" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="note_dead" value="&lt;b&gt;已判死的路线(实测)&lt;/b&gt;&lt;br&gt;· 加 warp / 偷 slot:相位已是单 slot 链深(R31)&lt;br&gt;· 带宽:tw8==tw16 全平&lt;br&gt;· rcp 替代:消融 ≤0.2 µs(R32)&lt;br&gt;· 双 block 显式交错:ptxas 已自动调度(R32)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9f9f9;strokeColor=#666666;fontSize=11;align=left;spacing=6" vertex="1" parent="1">
+          <mxGeometry x="800" y="560" width="280" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="summary" value="&lt;b&gt;结论&lt;/b&gt;:transform-free 上界(probe4)= 8k gu 38.9 µs(≈mxfp8)。+12.6 µs 余量 = 每 kb 暴露 ~0.26 µs 依赖链 × 48 kb 关键路径;其中约半为两端 mbarrier 唤醒(同步结构),半为上述 1–2 指令环节的串行和。对 warp 数、发射口、带宽均不敏感(R31 probe5 / tw8==tw16 实证)。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f4e8;strokeColor=#82b366;fontSize=12;align=left;spacing=10" vertex="1" parent="1">
+          <mxGeometry x="160" y="960" width="920" height="90" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
