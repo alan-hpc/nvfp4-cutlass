@@ -770,6 +770,35 @@
   精度恒定 10×:0.9954 vs 0.9546。剩余差距集中于 8k gate_up 一点(1.35×,
   波数 2.16 恰在 wave-ceil 最不利区间 + 2B 激活交付);down 全点位已达/超平价。</p>
 
+  <h3>协作攻坚 · R29 prefill 六点逐一归因——每个点的 bound 在哪(2026-08-01 深夜)</h3>
+  <p><strong>新证据三件</strong>:① down 形状 warp 时钟(dual):tfm 0.317/0.721(69% 占空比,
+  居首)——<b>down 也是 transform 步调</b>,且 K&lt;1024 走 w8 配置(w8/w16/cd64 重扫全平,
+  knob 已顶);② down 的 sms 阶梯:每 tile 4.19 µs、截距 7.7,ceil 模型对 8k down 误差
+  0.1 µs,但 16k down 差 <b>+5.7 µs</b>——大 M(139 m-blocks)存在交付退化;
+  ③ <b>DeepGEMM mxfp8 的几何</b>(读源码):m-grouped 一律 swap-AB + BLOCK_N=128 细 tile +
+  cluster_n=2 对 A 做 TMA 多播,148 SM 持久化,无 wave 平衡项。其 tile/wave:
+  8k gu 640/4.32(ceil 5)、16k gu 1112/7.51(ceil 8)、8k dn 1280/8.65(ceil 9)、
+  16k dn 2224/15.03(<b>ceil 16,末波仅 4/148 CTA——病态</b>)。
+  拟合其 gu tile ≈ 5.6 µs、dn tile ≈ 2.6 µs。</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位</th><th class="num">gap vs mxfp8</th><th class="num">dual 溢价</th><th class="num">wave-ceil 运气差</th><th class="num">剩余(技术/交付)</th><th>该点的 bound</th></tr>
+    <tr><td>2k gate_up</td><td class="num">+2.0</td><td class="num">2.0</td><td class="num">≈0</td><td class="num">≈0</td><td>sub-wave:单波 tile 时间(transform 步调)+ 序言</td></tr>
+    <tr><td>8k gate_up</td><td class="num"><strong>+13.3</strong></td><td class="num">4.7</td><td class="num"><strong>+7.5</strong>(我 +11.3 vs 他 +3.8)</td><td class="num"><strong>+1.1</strong></td><td><strong>wave-ceil 运气</strong>(2.16 波,ceil 罚 22%);扣除后技术差近零</td></tr>
+    <tr><td>16k gate_up</td><td class="num">+10.8</td><td class="num">6.6</td><td class="num">+0.5(双方中性)</td><td class="num">+3.7</td><td>溢价 + 大 M 交付退化</td></tr>
+    <tr><td>2k down</td><td class="num"><strong>−2.0(反超)</strong></td><td class="num">0.75</td><td class="num">−1.4(他 ceil 4/3.46)</td><td class="num">−1.3</td><td>—(全顺)</td></tr>
+    <tr><td>8k down</td><td class="num">+1.9</td><td class="num">2.1</td><td class="num">≈+0.4</td><td class="num">≈−0.6</td><td>transform 步调的 tile 时间;扣溢价即平价</td></tr>
+    <tr><td>16k down</td><td class="num">+1.8</td><td class="num">3.9</td><td class="num">−2.5(他 ceil-16 病态)</td><td class="num">+0.4</td><td><strong>大 M 交付退化</strong>(ceil 模型缺口 +5.7)被对手的坏运气抵消</td></tr>
+  </table></div>
+  <blockquote><strong>R29 结论</strong>:prefill 的 bound 不是一个点而是三种:
+  ① 所有点的 per-tile 时间仍由 <b>transform 步调</b>(gu 72% / dn 69% 占空比)——V3 后
+  knob 全顶,只剩指令级空间;② <b>8k gate_up 的 +35% 里 22 个百分点是 wave-ceil 运气</b>
+  (2.16 波恰为最不利;对手细 tile 只罚 16%),扣除运气与双遍溢价后单点技术差 ~1 µs;
+  ③ 16k 两点共有 <b>大 M 交付退化</b>(ceil 模型外 +4~6 µs,L2 命中率随 M 下降,待 ncu 确认)。
+  照抄 DeepGEMM 的 swap+bn128 细 tile 对 fused 设计不可行:swap 下 token tile 被
+  weight 行数重复 transform(gu 为 8×,比 normal 的 4× 更糟)——他们没有片上 transform
+  才能这么切。<b>wave-ceil 的可行解仍是 megafusion(跨层整 tile 填尾波,R27/R28 已论证);
+  交付退化是 16k 的下一个测量目标。</b></blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
