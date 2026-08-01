@@ -1,0 +1,80 @@
+<mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1180" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="lg1c" value="" style="rounded=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;" vertex="1" parent="1"><mxGeometry x="300" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg1t" value="A 数据 / A0 遍" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="324" y="22" width="110" height="22" as="geometry" /></mxCell>
+    <mxCell id="lg2c" value="" style="rounded=1;fillColor=#FBE7D8;strokeColor=#E8C4A0;" vertex="1" parent="1"><mxGeometry x="450" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg2t" value="残差 / A1 遍" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="474" y="22" width="100" height="22" as="geometry" /></mxCell>
+    <mxCell id="lg3c" value="" style="rounded=1;fillColor=#E4F2E4;strokeColor=#B5D6B5;" vertex="1" parent="1"><mxGeometry x="590" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg3t" value="W / UMMA" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="614" y="22" width="90" height="22" as="geometry" /></mxCell>
+    <mxCell id="lg4c" value="" style="rounded=1;fillColor=#FBF3D5;strokeColor=#E3D08F;" vertex="1" parent="1"><mxGeometry x="720" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg4t" value="scale / 同步·唤醒" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="744" y="22" width="130" height="22" as="geometry" /></mxCell>
+    <mxCell id="lg5c" value="" style="rounded=1;fillColor=#FFFFFF;strokeColor=#BBBBBB;dashed=1;" vertex="1" parent="1"><mxGeometry x="890" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg5t" value="等待(硬件挂起)" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="914" y="22" width="130" height="22" as="geometry" /></mxCell>
+    <mxCell id="lg6c" value="" style="rounded=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="1054" y="24" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lg6t" value="张量核空窗(~170ns,战役前 284)" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="1078" y="22" width="240" height="22" as="geometry" /></mxCell>
+    <mxCell id="title" value="R36 终态稳态时序 · 每 kb 周期 ≈ 750 ns(战役前 834)· prefill 8k gate_up · bk128/w16/cd64/逻辑s4(A×3·产物×2·B/SFB×4)+ A-first 屏障 · 实测 tfm 0.167/0.575 · mma 0.487/0.230 · 横轴 1px=1ns" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=14;fontStyle=1;fontColor=#1B7A2F" vertex="1" parent="1">
+      <mxGeometry x="160" y="52" width="1310" height="40" as="geometry" />
+    </mxCell>
+    <mxCell id="ax0" value="0" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="145" y="96" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax2" value="200" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="345" y="96" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax4" value="400" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="545" y="96" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax6" value="600" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="745" y="96" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax75" value="750(=period)" style="text;html=1;fontSize=10;align=center;fontColor=#2D7600" vertex="1" parent="1"><mxGeometry x="870" y="96" width="90" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax10" value="1000" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="1145" y="96" width="40" height="16" as="geometry" /></mxCell>
+    <mxCell id="ax12" value="1250 ns" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="1390" y="96" width="50" height="16" as="geometry" /></mxCell>
+
+    <mxCell id="lb1" value="TMA load&#10;warp 0" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="118" width="135" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg1" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="118" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="tma_w" value="T1 等 empty[s](B槽) → T2 影子等 transform_full[t−3](A槽,R35)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="124" width="474" height="38" as="geometry" /></mxCell>
+    <mxCell id="tma_wk" value="T3 唤醒+发射 A(→full_a)·B·SFB(→full)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=10" vertex="1" parent="1"><mxGeometry x="640" y="124" width="110" height="38" as="geometry" /></mxCell>
+    <mxCell id="tma_fl" value="T4 A tx 途中(32KB,串行 DMA ~600ns,R19 证)→ full_a 先落 · B/SFB 尾随 → full" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F7FF;strokeColor=#B9C7E8;dashed=1;fontSize=10;fontColor=#7A8BB5" vertex="1" parent="1"><mxGeometry x="750" y="124" width="700" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="lb2" value="transform&#10;warps 3–18 · x2 交错" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="0" y="182" width="145" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg2" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="182" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="tf_wk" value="F1 唤醒(full_a,A-first R36)+ 产物槽 empty[t−2] 快路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="188" width="140" height="38" as="geometry" /></mxCell>
+    <mxCell id="tf_ch" value="F2-F6 链:LDS×4 → amax树×2 → 标量(整数解码/rcp/打包)→ pack A0 → pack A1(V3 全套)≈ 435ns 有效链 / 575ns work 窗口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="306" y="188" width="360" height="38" as="geometry" /></mxCell>
+    <mxCell id="tf_ar" value="F8 fence+arrive" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=10" vertex="1" parent="1"><mxGeometry x="666" y="188" width="60" height="38" as="geometry" /></mxCell>
+    <mxCell id="tf_w" value="F9 等 full_a[s+1](均摊 167ns/kb,A-first 后从 193 再降)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="726" y="188" width="184" height="38" as="geometry" /></mxCell>
+    <mxCell id="tf_nx" value="kb X+1(写 A0/A1/SFA 到产物槽 (t+1)%2,读 A 槽 (t+1)%3)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;opacity=45;fontSize=10" vertex="1" parent="1"><mxGeometry x="910" y="188" width="540" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="lb3" value="scale copy&#10;warp 2 · SFB 转置" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="246" width="135" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg3" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="246" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="sf_tr" value="S1 等 full(B/SFB)→ 转置 → 计入 transform_full" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="252" width="260" height="38" as="geometry" /></mxCell>
+    <mxCell id="sf_w" value="S2 等下一 full" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="426" y="252" width="1024" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="lb4" value="MMA 发射&#10;warp 1" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="310" width="135" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg4" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="310" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="mma_w" value="M1 等 transform_full[s] + full[s](B 落地门,R36 快路)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="316" width="560" height="38" as="geometry" /></mxCell>
+    <mxCell id="mma_is" value="M2 唤醒 + UTCCP SFA(产物槽 t%2)/SFB + UMMA×2/atom 发射(230ns;A0/A1 描述符按 slot_pr 交换)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4F2E4;strokeColor=#B5D6B5;fontSize=10" vertex="1" parent="1"><mxGeometry x="726" y="316" width="290 " height="38" as="geometry" /></mxCell>
+    <mxCell id="mma_w2" value="M3 等 transform_full[s+1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="1016" y="316" width="434" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="lb5" value="张量核&#10;tcgen05 异步" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="374" width="135" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg5" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="374" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="tc_p" value="C1 UMMA 执行 kb X−1(A0×W → A1×W,~580ns)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="380" width="580" height="38" as="geometry" /></mxCell>
+    <mxCell id="tc_i" value="C2 ★空窗 ~170ns★" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=11;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="746" y="380" width="170" height="38" as="geometry" /></mxCell>
+    <mxCell id="tc_c" value="C3 UMMA 执行 kb X(~580ns)…" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="916" y="380" width="534" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="lb6" value="epilogue&#10;warps 19–22" style="text;html=1;fontSize=14;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="438" width="135" height="50" as="geometry" /></mxCell>
+    <mxCell id="bg6" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="438" width="1290" height="50" as="geometry" /></mxCell>
+    <mxCell id="epi_w" value="E1 等 tmem_full(tile 粒度 ~12.1µs/tile;work 1.83;cd64 双 CD stage 保留——cd32 单缓冲曾把它撑成 3.66 新墙,R35 教训)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="444" width="1284" height="38" as="geometry" /></mxCell>
+
+    <mxCell id="ev0" value="" style="rounded=0;fillColor=#2D7600;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="159" y="112" width="3" height="380" as="geometry" /></mxCell>
+    <mxCell id="ev0l" value="full_a[s]:kb X 的 A 落地(B/SFB 尾随 → full)" style="text;html=1;fontSize=10;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="162" y="492" width="300" height="16" as="geometry" /></mxCell>
+    <mxCell id="ev1" value="" style="rounded=0;fillColor=#9673A6;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="725" y="112" width="3" height="380" as="geometry" /></mxCell>
+    <mxCell id="ev1l" value="transform_full @~575" style="text;html=1;fontSize=10;fontColor=#9673A6;fontStyle=1" vertex="1" parent="1"><mxGeometry x="640" y="492" width="150" height="16" as="geometry" /></mxCell>
+    <mxCell id="ev3" value="" style="rounded=0;fillColor=#2D7600;strokeColor=none;dashed=1;" vertex="1" parent="1"><mxGeometry x="909" y="112" width="3" height="380" as="geometry" /></mxCell>
+    <mxCell id="ev3l" value="full_a[s+1] @750 → 周期重复" style="text;html=1;fontSize=10;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="860" y="492" width="200" height="16" as="geometry" /></mxCell>
+
+    <mxCell id="n1" value="R33-R36 对时序的改动:① 逻辑 4 stage(A×3/产物×2/B·SFB×4 按寿命定深)→ 环/4;② A-first:transform 等 full_a 而非 full(B/SFB 尾巴出链,tfm wait 193→167);③ TMA 多两个影子等待(t−3 A 槽 / t−2 产物槽,均快路);④ MMA 增 full(B)门(快路)+ 描述符按 slot_pr(t%2)交换;⑤ 空窗 284→~170ns/kb,period 834→750。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDFEFF;strokeColor=#B9C7E8;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="524" width="1290" height="104" as="geometry" />
+    </mxCell>
+    <mxCell id="n2" value="剩余优化空间的终审(战役 20 轮判据收敛后):【契约内,已萃干】数学链 R25/31/32、深度 R35(s4/sh3/pr2=上限)、工人 R31、拆分 R10/R17、序 R19、knob 全类 R18/28/30——每类均有实测排除;残余空窗 ~170ns/kb = 链暴露(~435ns 有效链 − 上条执行覆盖)+ 唤醒,属 fused 契约的结构地板。【契约内,仅存一项未做】序言/截距压缩(plan #8:TMEM 分配移出关键路径、首 tile TMA 预取提前)≈ 1-2µs,惠及全点位——唯一具体的剩余工程项。【降精度换速】单遍 NVFP4 43.1(−4.1µs,cosine 0.9954→0.9910)按形状可选。【契约外】megafusion(尾波+核间隙+激活往返)、预量化 A(放弃 fused)、部署侧 sms=107 共驻(免费 28% SM)与 batch 整形(避开 2.16-wave 恶区)。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8F0;strokeColor=#D79B00;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="640" width="1290" height="150" as="geometry" />
+    </mxCell>
+    <mxCell id="n3" value="数字出处:R16a/R14 warp 时钟(独立 iters 槽)、probe4 上界 34.9、R19 DMA 串行证明、R35 诊断(cd32 epilogue 墙)、R36 A-first;period=(47.2−截距11)/48kb≈750ns。历史对照(834ns 版)见 transform-warp-timeline.drawio 与 transform-3stage-overlap.drawio。" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontColor=#666666;spacing=4" vertex="1" parent="1">
+      <mxGeometry x="160" y="800" width="1290" height="50" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
