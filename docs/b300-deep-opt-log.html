@@ -852,6 +852,26 @@
   每环节皆为 1-2 条指令。数学侧的可削空间已萃干,剩余属于 mbarrier 唤醒延迟
   (硬件属性)与 s0 编码 CVT(契约)。</p>
 
+  <h3>消除空窗战役 · R33 环模型 + bk64×6 stage 落地(2026-08-02 凌晨,goal:连续 20 轮无加速才停)</h3>
+  <p><strong>环模型(定量闭合)</strong>:稳态 period = stage 生命周期串行环 ÷ 流水深度。
+  实测环 = transform 604 + 发射 208 + 执行 ~580 + TMA tx ~1000 + 唤醒 ~240 ≈ 2502 =
+  3 × 834 ✓。三重旁证:V3 收益按 Δ/3 兑现(93≈89)、stage=2 崩溃≈环/1(预测 ~131,
+  实测 152.97)、TMA 泳道 93% 等待却非瓶颈(tx 是环的组成部分)。</p>
+  <p><strong>R33(=goal R1-R4)</strong>:bk64 半尺寸 k-block 使每 stage SMEM 减半 →
+  装下 <b>6 个 stage</b>,深度分摊胜过跳数翻倍:8k gu 51.3→49.2、8k dn 28.7→<b>26.65
+  (首次反超 mxfp8 26.82)</b>、16k dn 47.0→<b>41.7(−11%,大 M 交付退化被深流水吸收)</b>、
+  16k gu −2~−3;sub-wave/decode 由 tiles≥2×SMs 门槛隔离。compute_stages 上限 4→8;
+  x2 交错按调用点分流(bk64 受益 −1.4,swap bk256 有害 +2 → kPairDecompose 开关)。
+  新地板:transform 回归周期(占空比 80%,每 half-kb 链 ~294ns + 唤醒)。</p>
+  <p><strong>R34(=goal R5-R10)</strong>:R6 四分之一 atom slot(st.shared.u8 SF 字节 +
+  8B v2 A0/A1 存储 + 断言放宽)解锁 bk64/tw16:16k gu 再 −2(62.5-65.3 波段),采纳。
+  R9 位构造精确倒数(PRMT 8 项表,逐位等价)——消融曾示 1.14µs,实测归零,revert
+  (<b>无加速 1/20</b>)。R10 split_transform 深 stage 重审:73.7 vs 49.2,双屏障税
+  ×96 half-kb 灾难性放大,R24 死刑维持(<b>无加速 2/20</b>)。probe4 窗口在新工况仍
+  ~12.7µs(上界同步下移 38.9→36.3)——消除条件:链+唤醒 ≤263ns(现 ~370)。
+  下一主线:异深 stage(bk128 逻辑 s4,B×4 其余×3 + cd32,回归周期 664/kb → ~43µs),
+  对抗评审进行中。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
