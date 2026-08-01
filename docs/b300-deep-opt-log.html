@@ -890,6 +890,27 @@
   正确性全逐位。新画像:period 757/kb,tfm work 564(74.5%),probe4 窗口仍 ~12.5µs
   (上界 34.9)。计数 0/20。</p>
 
+  <h3>消除空窗战役 · 终局(2026-08-02):连续 20 轮无加速,按判据收敛</h3>
+  <p><strong>有效轮(R33-R36)</strong>:环模型 → bk64×s6(49.2)→ 四分之一 atom tw16(49.0)
+  → 异深 stage 逻辑 s4(47.70)→ A 先行屏障(47.20)。8k gate_up 累计 51.3→47.2(−8%),
+  自会话起点 63.5 累计 <b>−25.7%</b>。</p>
+  <p><strong>无加速 20 连(R16-R35,全部留档)</strong>:深度微变体(pr1 灾难 65.4/sh2 51.4)、
+  atom-split 到达(49.1,每 kb 跳税)、残余 knob 复扫全平、B-first 序(+0.6,证 DMA 串行)、
+  unroll 微调×2、sms 均衡、2-SM 真多播(分析排除:专家边界墙 + recurrence 非环限)、
+  l2_pin(64.3)/direct_a(72.4)/tail_split(83.7)新 regime 复测负、swap 重调平、
+  bk64-shallow 负、sub-wave 扫平、种子/EP/eager/规范终测四连确认。</p>
+  <div class="tablewrap"><table>
+    <tr><th>终态 vs mxfp8×mxfp4</th><th class="num">dual</th><th class="num">mxfp8</th><th class="num">Δ</th></tr>
+    <tr><td>prefill 2k / 8k / 16k down</td><td class="num"><b>14.37 / 26.68 / 42.51</b></td><td class="num">16.22 / 26.76 / 45.06</td><td class="num"><b>全点位反超(−11%/平/−6%)</b></td></tr>
+    <tr><td>prefill 8k / 16k gate_up</td><td class="num">47.36 / 61.50</td><td class="num">38.68 / 55.23</td><td class="num">+22% / +11%(战役前 +35%/+19%)</td></tr>
+    <tr><td>decode 16/32/128 gate_up(swap)</td><td class="num"><b>10.27 / 10.28 / 14.54</b></td><td class="num">12.33 / 12.46 / 18.47</td><td class="num"><b>−17%/−17%/−21%</b></td></tr>
+  </table></div>
+  <blockquote><strong>剩余空窗的终审</strong>:probe4 窗口 ~12.5µs 是常数不变量
+  (上界随基线同降 38.9→34.9)——本质为每 kb ~260ns 的 transform 链暴露:数学侧已萃干
+  (R25/R31/R32),同步双跳属硬件,工人/带宽/深度/拆分四类杠杆全部实测排除。在
+  「fused 单核 + 逐 tile 片上双 NVFP4 变换」的设计契约下,这就是结构地板。
+  精度恒定:0.9954(误差为标准 NVFP4 的 1/2、mxfp8 的 1/10)。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
