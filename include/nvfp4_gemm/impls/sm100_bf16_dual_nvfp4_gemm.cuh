@@ -360,6 +360,16 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             }
             probe_flush(0);
         }
+        // This CTA has issued its last global read (B/SFB always; A too unless
+        // direct-global mode keeps the transform warps LDG'ing it).  Fire the
+        // PDL trigger so the dependent grid launches once the SLOWEST CTA
+        // passes this point: under wave-ceil imbalance the early-finishing
+        // CTAs' SMs then host the successor's prologue instead of idling.
+        // Contract note (same as DeepGEMM): the epilogue still reads
+        // `global_scales` and TMA-stores D after this -- the launcher must not
+        // let a dependent overwrite those.
+        if constexpr (not kDirectGlobalA)
+            cudaTriggerProgrammaticLaunchCompletion();
         // ==================================================================
         // Warp 1: MMA issue -- two block-scaled passes per K step
         // ==================================================================

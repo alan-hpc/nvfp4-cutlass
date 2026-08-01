@@ -680,6 +680,39 @@
   更细 N-tile 降低 wave 量化(但会翻倍 transform 总量,当前得不偿失)、
   2-SM UMMA+真多播攻 13 µs 交付底(旧存档路线,regime 变化后值得重估)。</blockquote>
 
+  <h3>协作攻坚 · R27 「Persistent Kernel 能救 wave 量化吗」——实证裁决(2026-08-01 夜)</h3>
+  <p><strong>事实核查:内核已经是 persistent kernel</strong>。grid = 148 常驻 CTA,
+  调度器 <code>next = (++iter) * kNumSMs + blockIdx.x</code> 静态跨步取 tile,
+  TMEM/屏障/描述符每 CTA 只付一次——persistence 本身没有增量可拿。
+  Wave 量化因此不是 launch 机制问题,而是<strong>排程下界</strong>:320 个等成本 tile
+  分给 148 个 worker,makespan = ⌈320/148⌉ = 3,<em>动态原子取号与静态跨步完全同界</em>
+  (动态只在 tile 成本不均时有意义,本负载 tile 全同构)。</p>
+  <p><strong>Makespan 模型实证</strong>(set_num_sms,8k gate_up dual):</p>
+  <div class="tablewrap"><table>
+    <tr><th>SMs</th><th class="num">148</th><th class="num">107</th><th class="num">80</th><th class="num">74</th></tr>
+    <tr><td>ceil(320/SMs)</td><td class="num">3</td><td class="num">3</td><td class="num">4</td><td class="num">5</td></tr>
+    <tr><td>实测 µs</td><td class="num">51.28</td><td class="num"><strong>51.21</strong></td><td class="num">65.17</td><td class="num">78.13</td></tr>
+  </table></div>
+  <p><b>sms=107 与 148 同速</b>——尾波里 124-107=41 个 SM 整场贡献为零;每 +1 tile
+  台阶 13–14 µs,截距 ~11 µs(序言+排空+交付底)。<strong>可立即兑现的推论</strong>:
+  部署侧把本核压到 sms≈107,把 41 个 SM 让给并发流上的独立算子(quantize/通信/attention
+  片段),GEMM 零损失,白捡 28% 的 SM 容量。</p>
+  <p><strong>PDL 跨核回收</strong>:发现内核只调了 <code>cudaGridDependencySynchronize()</code>
+  而从未 fire <code>cudaTriggerProgrammaticLaunchCompletion()</code>——下游必须等全部 CTA
+  退出,尾波对下游完全不可见。补上 trigger(TMA warp 出调度循环即 fire,契约同
+  DeepGEMM:此后仅剩 global_scales 读与 D 写)后:solo 无回退(51.28),链式
+  gu→down 改善 +0.6~0.7 µs,但净回收仍为负(graph −2.8 / eager −4.9):
+  结构性上限在于<em>下游自己的 GridDependencySynchronize 位于其序言极早处</em>
+  (之前只有屏障初始化+TMEM 分配 ~1-2 µs 可重叠),叠加两个不同 cubin 交替的
+  冷 icache/L2 代价 ~3-5 µs。trigger 保留(无害且方向正确)。</p>
+  <blockquote><strong>R27 结论</strong>:wave 量化的真解不在 persistence(已有)也不在
+  动态调度(同界),而在三条路:① <b>sms 让位 + 异构算子共驻</b>(零成本,立即可用);
+  ② <b>尾波拆分</b>(最后一轮 tile 降为 bn128 摊给闲置 SM——同核异构 tile 形状,重构大);
+  ③ <b>gate_up+SiLU+down 单核 megafusion</b>——persistent CTA 跨层继续取 tile,
+  960 tiles/148 = ceil 7 对比分核 3+5=8,省 ~1 个 tile 时间 + 核间空隙 + 省一遍
+  21 MB×2 的激活读写;需 per-expert 进度原子与 SiLU 融合 epilogue,是尾波问题的
+  结构级终解。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
