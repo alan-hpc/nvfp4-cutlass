@@ -151,6 +151,55 @@ CUTLASS_DEVICE uint32_t cvt_e2m1x2_bf16x2(const uint32_t& pair)
     return r;
 }
 
+/// Four packed BF16 pairs -> one word of four packed E2M1 pairs.
+///
+/// Same vector-mov trick as the f32 form: the four `.b8` results assemble in
+/// the destination register without widening movs or shift/or chains.
+CUTLASS_DEVICE uint32_t cvt_e2m1x8_bf16x2(const uint32_t& p0, const uint32_t& p1,
+                                          const uint32_t& p2, const uint32_t& p3)
+{
+    uint32_t r;
+    asm volatile(
+        "{\n\t"
+        ".reg .b8 t0, t1, t2, t3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.bf16x2 t0, %1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.bf16x2 t1, %2;\n\t"
+        "cvt.rn.satfinite.e2m1x2.bf16x2 t2, %3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.bf16x2 t3, %4;\n\t"
+        "mov.b32 %0, {t0, t1, t2, t3};\n\t"
+        "}\n"
+        : "=r"(r)
+        : "r"(p0), "r"(p1), "r"(p2), "r"(p3));
+    return r;
+}
+
+/// Eight FP32 values -> one word of four packed E2M1 pairs.
+///
+/// The four `.b8` results pack straight into the destination through a vector
+/// mov, so ptxas emits a couple of PRMT merges instead of four widening movs
+/// plus a shift/or chain.  Element 2i lands in the low nibble of byte i,
+/// mirroring `cvt_e2m1x2`'s float2 convention (PTX `cvt.e2m1x2.f32 d, a, b`
+/// puts b in the low nibble).
+CUTLASS_DEVICE uint32_t cvt_e2m1x8_f32(const float& f0, const float& f1,
+                                       const float& f2, const float& f3,
+                                       const float& f4, const float& f5,
+                                       const float& f6, const float& f7)
+{
+    uint32_t r;
+    asm volatile(
+        "{\n\t"
+        ".reg .b8 t0, t1, t2, t3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 t0, %2, %1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 t1, %4, %3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 t2, %6, %5;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 t3, %8, %7;\n\t"
+        "mov.b32 %0, {t0, t1, t2, t3};\n\t"
+        "}\n"
+        : "=r"(r)
+        : "f"(f0), "f"(f1), "f"(f2), "f"(f3), "f"(f4), "f"(f5), "f"(f6), "f"(f7));
+    return r;
+}
+
 /// Decode a packed E2M1 byte straight into a BF16 pair.
 ///
 /// The packed residual path subtracts `dec(q0)` from `u` in bf16x2; both are

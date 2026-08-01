@@ -617,6 +617,41 @@
   两者相除天然自归一。启发式 gate 只看四个形状 knob，probe knob 不在其中——
   探针工况与生产工况同为 w16/cd64，数据可直接对照。</p>
 
+  <h3>协作攻坚 · R25 指令级手术——SASS 证伪 CVT-bound,发射口数才是卡点(2026-08-01 晚)</h3>
+  <p><strong>归因(workflow 三路审计 + cuobjdump 直方图)</strong>:packed-bf16 内核的 SASS 显示
+  <code>FMUL</code> ×262 + <code>F2FP.BF16.F32.PACK_AB</code> ×130——SM100 有原生 bf16x2
+  max(<code>VHMNMX.BF16</code>)与加法(<code>HADD2.BF16_V2</code>),但<strong>没有原生 bf16x2
+  乘法</strong>:每个 <code>__hmul2</code> 被 ptxas 降解为 2×FMUL + 1 次 CVT 管线重打包。</p>
+  <p><strong>对照实验(全部实测)</strong>:全 f32-hybrid(乘法进 f32 域、<code>e2m1x2.f32</code>
+  直转,每对 CVT 3 个 vs 6 个,但总 op 更多)dual 反而 <b>+2.0 µs</b>(tfm work 0.885→0.960);
+  流式重构排除寄存器压力假说(不变)。<strong>结论:transform 热循环是发射/总口数受限,
+  不是 CVT 管线受限</strong>——审计的 CVT 定价模型被证伪,正确目标函数是「总 op 数最小」。
+  顺带收获:hybrid 逐位复现 f32 参考路径(cosine 0.999926/0.999961/0.999903)。</p>
+  <p><strong>V3(采纳)</strong>:bf16 域 + 三项削减——(1) q0/q1 <strong>向量打包转换器</strong>
+  <code>cvt_e2m1x8_bf16x2</code>:4 对一条 asm,<code>mov.b32 {t0..t3}</code> 免 4 次拓宽
+  mov + 移位或链;(2) 残差 ×8 用<strong>整数指数加法</strong>:r 与 8r 均 bf16-精确,
+  位表示 + <code>0x01800180</code>(指数场+3)1 条 IADD 替换模拟乘法 3 op,零半字变
+  ±2^−125·1.5 经 e2m1 就近舍入回 ±0,与乘法逐位一致;(3) 标量整数化:s0 解码
+  <code>(code&lt;&lt;20)+0x3C000000</code>(derived 的 2^−6 下限保证 e4m3-NORMAL)、amax
+  byte_perm 半字合并。编码侧 <code>cvt_e4m3</code> 保持硬件舍入与参考一致。</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位（graph 中位数, µs）</th><th class="num">packed-bf16</th><th class="num">V3</th><th class="num">Δ</th><th class="num">累计 vs f32</th></tr>
+    <tr><td>prefill 2k gate_up dual</td><td class="num">20.54</td><td class="num"><strong>19.77</strong></td><td class="num">−3.7%</td><td class="num">−20.6%</td></tr>
+    <tr><td>prefill 8k gate_up dual</td><td class="num">55.31</td><td class="num"><strong>51.33</strong></td><td class="num">−7.2%</td><td class="num">−19.2%</td></tr>
+    <tr><td>prefill 8k down dual</td><td class="num">30.72</td><td class="num"><strong>28.68</strong></td><td class="num">−6.6%</td><td class="num">−12.6%</td></tr>
+    <tr><td>prefill 16k gate_up dual</td><td class="num">70.49</td><td class="num"><strong>66.44</strong></td><td class="num">−5.7%</td><td class="num">−20.6%</td></tr>
+    <tr><td>prefill 16k down dual</td><td class="num">49.14</td><td class="num"><strong>45.91</strong></td><td class="num">−6.6%</td><td class="num">−16.5%</td></tr>
+    <tr><td>decode 128 gate_up swap</td><td class="num">16.39</td><td class="num"><strong>14.37</strong></td><td class="num">−12.3%</td><td class="num">−12.5%</td></tr>
+    <tr><td>decode 16 gu / 16 dn swap</td><td class="num">10.26 / 6.16</td><td class="num">10.25 / 6.16</td><td class="num">±0</td><td class="num">—</td></tr>
+  </table></div>
+  <p><strong>探针闭合</strong>:tfm work 0.885→<b>0.790 µs/kb</b>;dual 溢价 8.2→<b>4.25 µs</b>
+  (14.4 起算已削 70%;其中 ~2.06 是第二条 UMMA 的算法成本,transform 侧仅剩 ~2.2)。
+  精度回到 packed 值(div8 0.999921,−5e-6 域,u 的 bf16 双舍入,已验收)。
+  <strong>Post-V3 knob 重扫</strong>(cd64 强制,评审 rank-1):默认 s3/tw16=51.40 即最优,
+  s3/tw8 同噪声(51.25),s2 崩溃(152.97),s4/epi2 超 SMEM——knob 空间确认耗尽,
+  且 tw8≈tw16 旁证 transform 饱和度已降(duty 71%)。vs mxfp8 prefill 差距
+  1.72×→1.49×→<b>1.39×</b>(51.33 vs 37.0);decode128 反超幅度扩大(14.37 vs 18.46)。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

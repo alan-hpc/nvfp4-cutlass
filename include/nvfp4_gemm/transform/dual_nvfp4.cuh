@@ -204,40 +204,54 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
     }
 }
 
-/// Packed-BF16 Algorithm 1: the whole block stays in bf16x2 pairs.
+/// Packed Algorithm 1, op-count tuned against SASS reality.
 ///
-/// SM100 converts bf16x2 to and from E2M1 pairs directly, so no element ever
-/// visits FP32 except the per-block scalars (amax -> s0 -> rcp).  Precision
-/// argument: u is quantized to E2M1 (1 mantissa bit), so bf16 intermediates
-/// (8 bits) keep 7 bits of headroom; and the residual subtraction u - dec(q0)
-/// is exact in bf16 by Sterbenz's lemma whenever the two are within 2x, which
-/// the E2M1 grid guarantees away from dec = 0 (where the subtraction is
-/// trivially exact).  Warp clocks showed the FP32 hot loop at 87% duty on the
-/// prefill critical path; this cuts its CVT traffic by ~a third and halves
-/// the vector-ALU chains.
+/// Measured pipeline verdict (B300, warp clocks): the loop is issue-bound,
+/// not convert-pipe-bound -- an all-f32 variant with 3 convert ops per pair
+/// but more total ops measured SLOWER (0.960 vs 0.885 us/kb).  So this form
+/// minimizes TOTAL ops in bf16 domain:
+///   * u = x * rcp(s0) stays __hmul2 (ptxas emulates it as 2xFMUL + one
+///     F2FP repack -- 3 ops; the f32 unpack/mul alternative is 4+),
+///   * q0/q1 encode four pairs per asm block, vector-mov'ing the `.b8`
+///     results into one word (kills 4 widening movs + the shift/or chain),
+///   * the residual's *8 is an INTEGER exponent bump: r and 8r are both
+///     bf16-exact, so adding 3 (log2 radix) to both exponent fields via one
+///     IADD replaces the emulated multiply's 2xFMUL + repack.  Zero halves
+///     (u == dec) become +-2^-125*1.5, which e2m1's round-to-nearest returns
+///     to +-0 -- bitwise the same code the multiply produced,
+///   * scalars: hardware s0 ENCODE (rounding must match the reference), but
+///     integer decode -- the derived floor (2^-6) keeps s0 e4m3-NORMAL, whose
+///     f32 image is exactly (code << 20) + 0x3C000000.  ResidualAmax's 2^-9
+///     floor can reach subnormal codes and keeps the convert-chain decode.
+/// The residual subtraction u - dec is exact in bf16 by Sterbenz's lemma
+/// (both within 2x on the e2m1 grid, and trivially exact at dec = 0).
 template<ScalePolicy kScalePolicy, bool kEnableResidualPass = true>
 CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
-                                           uint8_t (&q0_bytes)[kBlockSize / 2],
-                                           uint8_t (&q1_bytes)[kBlockSize / 2],
+                                           uint32_t (&q0w)[kBlockSize / 8],
+                                           uint32_t (&q1w)[kBlockSize / 8],
                                            uint32_t& s0_code,
                                            uint32_t& s1_code)
 {
-    // 1: block amax, on packed pairs.
+    // 1: block amax on packed pairs; the two halves merge with one byte swap.
     __nv_bfloat162 m = __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[0]));
 #pragma unroll
     for (uint32_t i = 1; i < kBlockSize / 2; ++i)
         m = __hmax2(m, __habs2(*reinterpret_cast<const __nv_bfloat162*>(&xw[i])));
-    const float amax = fmaxf(__bfloat162float(m.x), __bfloat162float(m.y));
+    const uint32_t       mswap = __byte_perm(*reinterpret_cast<const uint32_t*>(&m), 0, 0x1032);
+    const __nv_bfloat162 mboth = __hmax2(m, *reinterpret_cast<const __nv_bfloat162*>(&mswap));
+    const float          amax  = __bfloat162float(mboth.x);
 
-    // 2: s0, identical to the scalar path (the rounded value must flow on).
+    // 2: s0 -- hardware encode, integer decode where the floor allows.
     constexpr float kFloor = kScalePolicy == ScalePolicy::ResidualAmax
                                  ? 1.0f / 512.0f
                                  : kS0FloorDerivedDiv8;
-    s0_code                = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
-    const float s0f        = ptx::cvt_e4m3_to_f32(s0_code);
-    const float inv_s0     = math::fast_rcp(s0f);
+    s0_code            = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
+    const float s0f    = kScalePolicy == ScalePolicy::ResidualAmax
+                             ? ptx::cvt_e4m3_to_f32(s0_code)
+                             : __int_as_float((s0_code << 20) + 0x3C000000u);
+    const float inv_s0 = math::fast_rcp(s0f);
 
-    // 3: u = x * rcp(s0) and q0, two elements per instruction throughout.
+    // 3: u = x * rcp(s0), two elements per (emulated) instruction.
     const __nv_bfloat162 inv2 = __float2bfloat162_rn(inv_s0);
     uint32_t             u2[kBlockSize / 2];
 #pragma unroll
@@ -245,66 +259,69 @@ CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
     {
         const __nv_bfloat162 u =
             __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&xw[i]), inv2);
-        u2[i]       = *reinterpret_cast<const uint32_t*>(&u);
-        q0_bytes[i] = static_cast<uint8_t>(ptx::cvt_e2m1x2_bf16x2(u2[i]));
+        u2[i] = *reinterpret_cast<const uint32_t*>(&u);
     }
+#pragma unroll
+    for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+        q0w[w] = ptx::cvt_e2m1x8_bf16x2(u2[4 * w + 0], u2[4 * w + 1], u2[4 * w + 2], u2[4 * w + 3]);
 
     if constexpr (not kEnableResidualPass)
     {
         s1_code = ptx::cvt_e4m3(s0f / kResidualRadix<kScalePolicy>);
 #pragma unroll
-        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
-            q1_bytes[i] = 0;
+        for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+            q1w[w] = 0;
         return;
     }
 
-    // 5/6: residual pass, still packed.
+    // 5/6: residual pass.
     if constexpr (kScalePolicy != ScalePolicy::ResidualAmax)
     {
-        constexpr float      kRadix = kResidualRadix<kScalePolicy>;
-        const __nv_bfloat162 radix2 = __float2bfloat162_rn(kRadix);
+        constexpr float    kRadix   = kResidualRadix<kScalePolicy>;
+        constexpr uint32_t kExpBump = (kRadix == 8.0f ? 3u : 2u) << 7;
         s1_code                     = ptx::cvt_e4m3(s0f / kRadix);
 #pragma unroll
-        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+        for (uint32_t w = 0; w < kBlockSize / 8; ++w)
         {
-            const uint32_t       dec_bits = ptx::cvt_bf16x2_e2m1x2(q0_bytes[i]);
-            const __nv_bfloat162 r        = __hmul2(
-                __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&u2[i]),
-                        *reinterpret_cast<const __nv_bfloat162*>(&dec_bits)),
-                radix2);
-            q1_bytes[i] = static_cast<uint8_t>(
-                ptx::cvt_e2m1x2_bf16x2(*reinterpret_cast<const uint32_t*>(&r)));
+            uint32_t r8[4];
+#pragma unroll
+            for (uint32_t j = 0; j < 4; ++j)
+            {
+                const uint32_t       dec_bits = ptx::cvt_bf16x2_e2m1x2(q0w[w] >> (j * 8));
+                const __nv_bfloat162 d        =
+                    __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&u2[4 * w + j]),
+                            *reinterpret_cast<const __nv_bfloat162*>(&dec_bits));
+                r8[j] = *reinterpret_cast<const uint32_t*>(&d) + (kExpBump | kExpBump << 16);
+            }
+            q1w[w] = ptx::cvt_e2m1x8_bf16x2(r8[0], r8[1], r8[2], r8[3]);
         }
     }
     else
     {
-        // Absolute-domain residual (r = (u - dec) * s0), then its own amax.
-        const __nv_bfloat162 s0f2 = __float2bfloat162_rn(s0f);
-        uint32_t             r2[kBlockSize / 2];
-        __nv_bfloat162       rm = __float2bfloat162_rn(0.0f);
+        // Absolute-domain residual (r = (u - dec) * s0) in f32: it needs the
+        // whole block's r before its own amax picks s1, and its extra scale
+        // multiplies are not power-of-2.  Non-default policy; correctness
+        // over cycles.
+        float r[kBlockSize];
+        float ramax = 0.0f;
 #pragma unroll
         for (uint32_t i = 0; i < kBlockSize / 2; ++i)
         {
-            const uint32_t       dec_bits = ptx::cvt_bf16x2_e2m1x2(q0_bytes[i]);
-            const __nv_bfloat162 r        = __hmul2(
-                __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&u2[i]),
-                        *reinterpret_cast<const __nv_bfloat162*>(&dec_bits)),
-                s0f2);
-            r2[i] = *reinterpret_cast<const uint32_t*>(&r);
-            rm    = __hmax2(rm, __habs2(r));
+            const uint32_t dec = ptx::cvt_bf16x2_e2m1x2(q0w[i / 4] >> (i % 4 * 8));
+            const float    ulo = __int_as_float(u2[i] << 16);
+            const float    uhi = __int_as_float(u2[i] & 0xffff0000u);
+            r[2 * i]           = (ulo - __int_as_float(dec << 16)) * s0f;
+            r[2 * i + 1]       = (uhi - __int_as_float(dec & 0xffff0000u)) * s0f;
+            ramax              = fmaxf(ramax, fmaxf(fabsf(r[2 * i]), fabsf(r[2 * i + 1])));
         }
-        const float r_amax = fmaxf(__bfloat162float(rm.x), __bfloat162float(rm.y));
-        s1_code            = ptx::cvt_e4m3(fmaxf(r_amax * kInvE2M1Max, 1.0f / 512.0f));
-        const __nv_bfloat162 inv_s1_2 =
-            __float2bfloat162_rn(math::fast_rcp(ptx::cvt_e4m3_to_f32(s1_code)));
+        s1_code            = ptx::cvt_e4m3(fmaxf(ramax * kInvE2M1Max, 1.0f / 512.0f));
+        const float inv_s1 = math::fast_rcp(ptx::cvt_e4m3_to_f32(s1_code));
 #pragma unroll
-        for (uint32_t i = 0; i < kBlockSize / 2; ++i)
-        {
-            const __nv_bfloat162 q =
-                __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&r2[i]), inv_s1_2);
-            q1_bytes[i] = static_cast<uint8_t>(
-                ptx::cvt_e2m1x2_bf16x2(*reinterpret_cast<const uint32_t*>(&q)));
-        }
+        for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+            q1w[w] = ptx::cvt_e2m1x8_f32(r[8 * w + 0] * inv_s1, r[8 * w + 1] * inv_s1,
+                                         r[8 * w + 2] * inv_s1, r[8 * w + 3] * inv_s1,
+                                         r[8 * w + 4] * inv_s1, r[8 * w + 5] * inv_s1,
+                                         r[8 * w + 6] * inv_s1, r[8 * w + 7] * inv_s1);
     }
 }
 
@@ -392,10 +409,10 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         }
 
         // ---- Algorithm 1 on each of the slot's 16-element blocks -------------
-        // 16-byte aligned: the stores below reinterpret these as uint4 groups.
-        __align__(16) uint8_t q0[kElemsPerSlot / 2];
-        __align__(16) uint8_t q1[kElemsPerSlot / 2];
-        uint32_t              sf0_word = 0, sf1_word = 0;
+        // Packed E2M1 words, four pairs each; the stores group them by four.
+        uint32_t q0[kElemsPerSlot / 8];
+        uint32_t q1[kElemsPerSlot / 8];
+        uint32_t sf0_word = 0, sf1_word = 0;
 #pragma unroll
         for (uint32_t b = 0; b < kBlocksPerSlot; ++b)
         {
@@ -404,20 +421,20 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
             for (uint32_t i = 0; i < kBlockSize / 2; ++i)
                 block[i] = xw[b * (kBlockSize / 2) + i];
 
-            uint8_t  q0_bytes[kBlockSize / 2], q1_bytes[kBlockSize / 2];
+            uint32_t q0wb[kBlockSize / 8], q1wb[kBlockSize / 8];
             uint32_t s0_code, s1_code;
             decompose_block_packed<kScalePolicy, kEnableResidualPass>(
                 block,
-                q0_bytes,
-                q1_bytes,
+                q0wb,
+                q1wb,
                 s0_code,
                 s1_code);
 
 #pragma unroll
-            for (uint32_t i = 0; i < kBlockSize / 2; ++i)
+            for (uint32_t w = 0; w < kBlockSize / 8; ++w)
             {
-                q0[b * (kBlockSize / 2) + i] = q0_bytes[i];
-                q1[b * (kBlockSize / 2) + i] = q1_bytes[i];
+                q0[b * (kBlockSize / 8) + w] = q0wb[w];
+                q1[b * (kBlockSize / 8) + w] = q1wb[w];
             }
             // The scales of an atom pack into one word, in sub-block order; a
             // half-atom slot fills its two bytes of that word.
@@ -431,16 +448,8 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
         {
             const uint32_t k_byte = k_base / 2 + g * 16;
             const uint32_t offset = swizzled_byte_offset<BLOCK_M, kSwizzleA0Mode>(m, k_byte);
-            ptx::st_shared(smem_a0 + offset,
-                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 0),
-                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 4),
-                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 8),
-                           *reinterpret_cast<const uint32_t*>(q0 + g * 16 + 12));
-            ptx::st_shared(smem_a1 + offset,
-                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 0),
-                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 4),
-                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 8),
-                           *reinterpret_cast<const uint32_t*>(q1 + g * 16 + 12));
+            ptx::st_shared(smem_a0 + offset, q0[g * 4 + 0], q0[g * 4 + 1], q0[g * 4 + 2], q0[g * 4 + 3]);
+            ptx::st_shared(smem_a1 + offset, q1[g * 4 + 0], q1[g * 4 + 1], q1[g * 4 + 2], q1[g * 4 + 3]);
         }
 
         // ---- Store the scale word, already in UTCCP order --------------------
