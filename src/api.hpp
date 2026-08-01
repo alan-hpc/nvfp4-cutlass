@@ -45,7 +45,8 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
                                                       int                  tune_no_pdl,
                                                       int                  tune_sched_group,
                                                       int                  tune_split_transform,
-                                                      int                  tune_timing_probe)
+                                                      int                  tune_timing_probe,
+                                                      int                  tune_tail_split)
 {
     const int m          = static_cast<int>(a.size(0));
     const int k          = static_cast<int>(a.size(1));
@@ -133,7 +134,8 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
         tune_no_pdl,
         tune_sched_group,
         tune_split_transform,
-        tune_timing_probe);
+        tune_timing_probe,
+        tune_tail_split);
 }
 
 inline void register_apis(pybind11::module_& m)
@@ -190,7 +192,8 @@ inline void register_apis(pybind11::module_& m)
           pybind11::arg("tune_split_transform")   = 0,
           // TIMING DECOMPOSITION ONLY -- 1 drops SFA1 UTCCPs, 2 drops the
           // second UMMA; both produce wrong numbers by design.
-          pybind11::arg("tune_timing_probe")      = 0);
+          pybind11::arg("tune_timing_probe")      = 0,
+          pybind11::arg("tune_tail_split")        = 0);
 }
 
 }   // namespace nvfp4_gemm::api

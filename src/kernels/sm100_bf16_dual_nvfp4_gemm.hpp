@@ -179,6 +179,18 @@ inline const char* to_string(const GemmType& type)
 /// measurement mode, not a production path.
 inline void* probe_buffer_for_launch = nullptr;
 
+/// Tail-split workspace: per device, parity double-buffered (under PDL, launch
+/// N+1 may overlap launch N's merge, so consecutive launches must not share
+/// slots), intentionally leaked (a static tensor would outlive CUDA teardown).
+/// Each half: 4 KB of per-tile ticket counters -- zeroed once at allocation,
+/// reset by each tile's merger after use -- then one 128x256 FP32 slot per
+/// possible piece. Single-stream use per device, like the probe buffer.
+/// First tail-split call per device allocates: run it once outside any CUDA
+/// graph capture (the JIT compile on first use imposes the same warmup).
+inline void* tail_ws_cache[64] = {};
+inline int   tail_ws_parity    = 0;
+constexpr size_t kTailWsHalfBytes = 4096 + static_cast<size_t>(296) * 128 * 256 * 4;
+
 /// Fused BF16 x NVFP4 m-grouped contiguous GEMM (MoE expert GEMM).
 ///
 /// Args:
@@ -214,7 +226,8 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
                                                             int                  tune_no_pdl,
                                                             int                  tune_sched_group,
                                                             int                  tune_split_transform,
-                                                            int                  tune_timing_probe)
+                                                            int                  tune_timing_probe,
+                                                            int                  tune_tail_split)
 {
     DualNVFP4Config config;
     if (tune_block_n > 0)
@@ -252,6 +265,25 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     config.validate();
 
     const int num_sms = device_runtime->get_num_sms();
+
+    // Tail-wave split (3D scheduling): cut the last round's tiles into
+    // k-pieces so the remainder SMs join the tail instead of idling.  Guards:
+    // a full round must exist, the pieces must fit the SM count, and the
+    // k-block count must divide evenly -- an empty piece would deadlock its
+    // epilogue.  Orthogonal to the cd64/w16 gate above by design: this knob
+    // changes scheduling, not tile geometry, and must never join that
+    // conjunction.
+    int tail_split = 0;
+    if (tune_tail_split > 1)
+    {
+        const int tiles  = ((m + config.block_m - 1) / config.block_m) *
+                          ((n + config.block_n - 1) / config.block_n);
+        const int rem    = tiles % num_sms;
+        const int num_kb = k / config.block_k;
+        if (tiles / num_sms >= 1 and rem > 0 and rem * tune_tail_split <= num_sms and
+            tune_tail_split <= num_kb and num_kb % tune_tail_split == 0)
+            tail_split = tune_tail_split;
+    }
 
     // A: BF16, K-major. A 128 B swizzle atom holds 64 BF16 elements.
     const auto tensor_map_a = tma::make_2d(CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
@@ -315,7 +347,8 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
          << "        " << (tune_direct_a ? "true" : "false") << ",\n"
          << "        " << tune_sched_group << ",\n"
          << "        " << (tune_split_transform ? "true" : "false") << ",\n"
-         << "        " << tune_timing_probe << ">);\n"
+         << "        " << tune_timing_probe << ",\n"
+         << "        " << tail_split << ">);\n"
          << "    (void) ptr;\n}\n";
 
     // Distinct cache names per variant keep the two pass counts from colliding
@@ -351,7 +384,26 @@ inline void sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor&
     // explicit optional pointer through the environment-free path below.
     void* probe_ptr = probe_buffer_for_launch;
 
-    jit::launch(kernel, launch_config, grouped_layout, global_scales, shape_m, shape_n, shape_k, map_a, map_b, map_sfb, map_cd, a_ptr, lda, probe_ptr);
+    float* tail_ws = nullptr;
+    if (tail_split > 1)
+    {
+        int dev = 0;
+        NVFP4_CUDA_CHECK(cudaGetDevice(&dev));
+        if (tail_ws_cache[dev] == nullptr)
+        {
+            void* buf = nullptr;
+            NVFP4_CUDA_CHECK(cudaMalloc(&buf, 2 * kTailWsHalfBytes));
+            const auto stream = at::cuda::getCurrentCUDAStream().stream();
+            NVFP4_CUDA_CHECK(cudaMemsetAsync(buf, 0, 4096, stream));
+            NVFP4_CUDA_CHECK(cudaMemsetAsync(static_cast<char*>(buf) + kTailWsHalfBytes, 0, 4096, stream));
+            tail_ws_cache[dev] = buf;
+        }
+        tail_ws_parity ^= 1;
+        tail_ws = reinterpret_cast<float*>(static_cast<char*>(tail_ws_cache[dev]) +
+                                           (tail_ws_parity ? kTailWsHalfBytes : 0));
+    }
+
+    jit::launch(kernel, launch_config, grouped_layout, global_scales, shape_m, shape_n, shape_k, map_a, map_b, map_sfb, map_cd, a_ptr, lda, probe_ptr, tail_ws);
 }
 
 /// Swap-AB variant for small-M batches (decode / small prefill).

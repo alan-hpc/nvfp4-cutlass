@@ -42,7 +42,7 @@ using transform::ScalePolicy;
 /// scheduler keeps that overlap, which is what `kNumEpilogueStages == 2` buys.
 /// Whether the thread saving or the overlap wins is shape-dependent and has to
 /// be settled by measurement on hardware.
-template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, uint32_t kNumForcedEpilogueStages, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass, bool kDirectGlobalA = false, uint32_t kNumBlocksPerGroup = 0, bool kSplitTransform = false, uint32_t kTimingProbe = 0>
+template<uint32_t SHAPE_N, uint32_t SHAPE_K, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K, uint32_t kNumGroups, uint32_t kSwizzleAMode, uint32_t kSwizzleABMode, uint32_t kSwizzleCDMode, uint32_t kNumStages, uint32_t kNumTransformWarps, uint32_t kNumEpilogueThreads, uint32_t kNumSMs, uint32_t kNumForcedEpilogueStages, GemmType kGemmType, ScalePolicy kScalePolicy, bool kEnableResidualPass, bool kDirectGlobalA = false, uint32_t kNumBlocksPerGroup = 0, bool kSplitTransform = false, uint32_t kTimingProbe = 0, uint32_t kTailSplit = 0>
 CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilogueThreads, 1)
     sm100_bf16_dual_nvfp4_gemm_impl(int* grouped_layout,
                                     const float* __restrict__ weight_global_scales,
@@ -55,7 +55,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                                     const __grid_constant__ cute::TmaDescriptor tensor_map_cd,
                                     const __nv_bfloat16* __restrict__ a_gmem,
                                     uint32_t                          lda,
-                                    unsigned long long*               probe_buf)
+                                    unsigned long long*               probe_buf,
+                                    float*                            tail_ws)
 {
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
     using Barrier     = cutlass::arch::ClusterTransactionBarrier;
@@ -139,6 +140,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     // scale atom (2 blocks), which is what admits 16 transform warps.
     NVFP4_STATIC_ASSERT(BLOCK_M * BLOCK_K / 16 % kNumTransformThreads == 0,
                         "Transform threads must evenly divide the A tile");
+    NVFP4_STATIC_ASSERT(kTailSplit == 0 or (SHAPE_K / BLOCK_K) % kTailSplit == 0,
+                        "Tail split must divide the k-block count evenly");
 
     const auto warp_idx = cutlass::canonical_warp_idx_sync();
     const auto lane_idx = ptx::get_lane_idx();
@@ -271,10 +274,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     constexpr uint32_t kBPG = kNumBlocksPerGroup != 0
                                   ? kNumBlocksPerGroup
                                   : sched::get_num_1d_blocks_per_group<BLOCK_M, BLOCK_N, kNumSMs>();
-    auto scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumSMs, kBPG>(
+    auto scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumSMs, kBPG, kTailSplit>(
         shape_m,
         shape_n,
-        grouped_layout);
+        grouped_layout,
+        math::ceil_div(shape_k, BLOCK_K));
 
     uint32_t stage_idx = 0, phase = 0;
     auto     advance_pipeline = [&](uint32_t& k_block_idx) {
@@ -290,8 +294,6 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     {
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
-            const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
-
             // Tile-invariant coordinates, hoisted out of the K loop.  The
             // expert offset inside `get_global_idx` is a dependent load of
             // `m_indices` from global memory, and the asm barriers in the loop
@@ -305,7 +307,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const uint32_t sfb_n_idx  = n_block_idx * BLOCK_N;
             const uint32_t sfb_k_base = scheduler.template get_global_idx<true>(shape_sfb_k, 1, 0, m_block_idx);
 
-            for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
+            // Piece bounds hoisted into locals for the same reason as the
+            // coordinate hoist above (O5): the asm barriers in the loop body
+            // force a reload of anything read through the scheduler object on
+            // every K step of the critical path.
+            const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
+            for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
                 const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
                 empty_barriers[stage_idx]->wait(phase ^ 1);
@@ -366,8 +373,10 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
         // passes this point: under wave-ceil imbalance the early-finishing
         // CTAs' SMs then host the successor's prologue instead of idling.
         // Contract note (same as DeepGEMM): the epilogue still reads
-        // `global_scales` and TMA-stores D after this -- the launcher must not
-        // let a dependent overwrite those.
+        // `global_scales`, TMA-stores D, and (tail-split mode) exchanges FP32
+        // partials through `tail_ws` after this -- the launcher must not let a
+        // dependent overwrite those; the host parity-double-buffers tail_ws
+        // for exactly that reason.
         if constexpr (not kDirectGlobalA)
             cudaTriggerProgrammaticLaunchCompletion();
         // ==================================================================
@@ -406,9 +415,9 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             tmem_empty_barriers[accum_stage_idx]->wait(accum_phase_idx ^ 1);
             ptx::tcgen05_after_thread_sync();
 
-            const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
+            const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
 #    pragma unroll 2
-            for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
+            for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
                 // Split pipeline: pass 0 launches on A0/SFA0/SFB readiness while
                 // the transform warps still quantize the residual.
@@ -486,9 +495,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
 #    pragma unroll
                     for (uint32_t a = 0; a < kNumKAtoms; ++a)
                     {
-                        // A0 x W: only the very first instruction of the very
-                        // first K block starts a fresh accumulator.
-                        issue_pass(a, a0_base_lo, kTmemStartColOfSFA0, a > 0 or k_block_idx > 0);
+                        // A0 x W: only the very first instruction of the piece's
+                        // first K block starts a fresh accumulator.  Keyed to
+                        // k_block_lo, not zero -- a tail k-piece starting at
+                        // k_lo > 0 must NOT accumulate onto the stale contents
+                        // of its recycled accumulator stage.
+                        issue_pass(a, a0_base_lo, kTmemStartColOfSFA0, a > 0 or k_block_idx > k_lo);
                         // A1 x W always accumulates on top.  Single-pass mode
                         // drops the instruction rather than multiplying by a
                         // zeroed A1, so the benchmark measures the real cost of
@@ -545,7 +557,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 }
 
                 cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(empty_barriers[stage_idx]));
-                if (k_block_idx == num_total_k_blocks - 1)
+                if (k_block_idx == k_hi - 1)
                     cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(tmem_full_barriers[accum_stage_idx]));
                 __syncwarp();
                 if constexpr (kTimingProbe == 3)
@@ -578,8 +590,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
 
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
-            const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
-            for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
+            const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
+            for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
                 full_barriers[stage_idx]->wait(phase);
 
@@ -604,12 +616,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
 
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
-            const auto num_total_k_blocks = math::ceil_div(shape_k, BLOCK_K);
             // Direct mode reads global A per tile; contiguous activations are
             // one flat tensor, so the row is just the tile's m index.
             const uint32_t tile_m_idx = m_block_idx * BLOCK_M;
 
-            for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks; advance_pipeline(k_block_idx))
+            const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
+            for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
                 const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
                 full_barriers[stage_idx]->wait(phase);
@@ -719,16 +731,38 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const float    global_scale =
                 weight_global_scales == nullptr ? 1.0f : __ldg(weight_global_scales + expert_idx);
 
-            epilogue::sm100_store_cd_gscale<
-                BLOCK_M,
-                BLOCK_N,
-                STORE_BLOCK_M,
-                STORE_BLOCK_N,
-                kSwizzleCDMode,
-                kNumTMAStoreStages,
-                kNumUMMAStoreThreads,
-                kGemmType,
-                cd_dtype_t>(smem_cd, tma_stage_idx, accum_stage_idx * UMMA_N, base_m_idx, base_n_idx, scheduler.current_group_idx, global_scale, epilogue_warp_idx, static_cast<uint32_t>(warp_idx) % 4u, lane_idx, tmem_empty_barriers[accum_stage_idx], tensor_map_cd);
+            auto store_normal = [&] {
+                epilogue::sm100_store_cd_gscale<
+                    BLOCK_M,
+                    BLOCK_N,
+                    STORE_BLOCK_M,
+                    STORE_BLOCK_N,
+                    kSwizzleCDMode,
+                    kNumTMAStoreStages,
+                    kNumUMMAStoreThreads,
+                    kGemmType,
+                    cd_dtype_t>(smem_cd, tma_stage_idx, accum_stage_idx * UMMA_N, base_m_idx, base_n_idx, scheduler.current_group_idx, global_scale, epilogue_warp_idx, static_cast<uint32_t>(warp_idx) % 4u, lane_idx, tmem_empty_barriers[accum_stage_idx], tensor_map_cd);
+            };
+            if constexpr (kTailSplit > 1)
+            {
+                if (scheduler.tail_slot != sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumSMs, kBPG, kTailSplit>::kNoTailSlot)
+                    epilogue::sm100_store_cd_tail_split<
+                        BLOCK_M,
+                        BLOCK_N,
+                        STORE_BLOCK_M,
+                        STORE_BLOCK_N,
+                        kSwizzleCDMode,
+                        kNumTMAStoreStages,
+                        kNumUMMAStoreThreads,
+                        kGemmType,
+                        kTailSplit,
+                        kTimingProbe,
+                        cd_dtype_t>(smem_cd, tma_stage_idx, accum_stage_idx * UMMA_N, base_m_idx, base_n_idx, scheduler.current_group_idx, global_scale, epilogue_warp_idx, static_cast<uint32_t>(warp_idx) % 4u, lane_idx, tmem_empty_barriers[accum_stage_idx], tensor_map_cd, tail_ws, scheduler.tail_slot, probe_buf);
+                else
+                    store_normal();
+            }
+            else
+                store_normal();
             if constexpr (kTimingProbe == 3)
             {
                 if (epilogue_warp_idx == 0)

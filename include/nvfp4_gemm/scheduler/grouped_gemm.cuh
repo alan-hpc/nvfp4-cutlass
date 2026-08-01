@@ -39,15 +39,28 @@ template<GemmType kGemmType,
          uint32_t BLOCK_N,
          uint32_t kNumGroups,
          uint32_t kNumSMs,
-         uint32_t kNum1DBlocksPerGroup = get_num_1d_blocks_per_group<BLOCK_M, BLOCK_N, kNumSMs>()>
+         uint32_t kNum1DBlocksPerGroup = get_num_1d_blocks_per_group<BLOCK_M, BLOCK_N, kNumSMs>(),
+         uint32_t kTailSplit           = 0>
 struct Scheduler
 {
+    static constexpr uint32_t kNoTailSlot = 0xffffffffu;
+
     int current_iter = -1;
 
     uint32_t num_blocks;
     uint32_t num_m_blocks;
     uint32_t num_n_blocks;
     uint32_t num_blocks_in_group;
+    uint32_t num_k_blocks;
+
+    /// 3D coordinates of the current work item: (m, n) via get_next_block's
+    /// out-params, and the k-block range here.  A full tile spans
+    /// [0, num_k_blocks); a tail k-piece spans a sub-range and identifies
+    /// itself through tail_slot (workspace slot) / tail_piece (k position).
+    uint32_t k_block_lo = 0;
+    uint32_t k_block_hi = 1;
+    uint32_t tail_slot  = kNoTailSlot;
+    uint32_t tail_piece = 0;
 
     int*     grouped_layout;
     uint32_t current_group_idx = 0;
@@ -56,12 +69,14 @@ struct Scheduler
 
     CUTLASS_DEVICE explicit Scheduler(const uint32_t& shape_m,
                                       const uint32_t& shape_n,
-                                      int*            grouped_layout = nullptr)
+                                      int*            grouped_layout = nullptr,
+                                      const uint32_t& num_k_blocks   = 1)
     {
         num_m_blocks         = math::ceil_div(shape_m, BLOCK_M);
         num_n_blocks         = math::ceil_div(shape_n, BLOCK_N);
         num_blocks           = num_m_blocks * num_n_blocks;
         this->grouped_layout = grouped_layout;
+        this->num_k_blocks   = num_k_blocks;
     }
 
     /// Map a linear block index to (m, n), grouped along M for L2 reuse.
@@ -117,6 +132,10 @@ struct Scheduler
     {
         const auto next_block_idx = (++current_iter) * kNumSMs + blockIdx.x;
 
+        k_block_lo = 0;
+        k_block_hi = num_k_blocks;
+        tail_slot  = kNoTailSlot;
+
         if constexpr (kGemmType == GemmType::MGroupedMasked)
         {
             // Expert row counts are only known at run time, so walk experts
@@ -137,6 +156,32 @@ struct Scheduler
         }
         else
         {
+            if constexpr (kTailSplit > 1 and kGemmType == GemmType::MGroupedContiguous)
+            {
+                // Tail-wave split: the last (partial) round's tiles are cut
+                // into kTailSplit contiguous k-pieces so the remainder SMs
+                // join instead of idling -- the makespan drops from
+                // ceil(tiles/SMs) whole tiles to full_rounds + 1/kTailSplit.
+                // The k range is computed HERE and only here; every role
+                // reads the same fields, so the pieces cannot disagree.
+                const uint32_t full_rounds = num_blocks / kNumSMs;
+                const uint32_t rem         = num_blocks % kNumSMs;
+                const uint32_t tail_start  = full_rounds * kNumSMs;
+                const bool     split_on    = full_rounds >= 1 and rem > 0 and
+                                         rem * kTailSplit <= kNumSMs and kTailSplit <= num_k_blocks;
+                if (split_on and static_cast<uint32_t>(next_block_idx) >= tail_start)
+                {
+                    const uint32_t j = static_cast<uint32_t>(next_block_idx) - tail_start;
+                    if (j >= rem * kTailSplit)
+                        return false;
+                    tail_slot  = j;
+                    tail_piece = j % kTailSplit;
+                    k_block_lo = tail_piece * num_k_blocks / kTailSplit;
+                    k_block_hi = (tail_piece + 1) * num_k_blocks / kTailSplit;
+                    get_swizzled_block_idx(tail_start + j / kTailSplit, m_block_idx, n_block_idx);
+                    return true;
+                }
+            }
             if (next_block_idx >= num_blocks)
                 return false;
             get_swizzled_block_idx(next_block_idx, m_block_idx, n_block_idx);

@@ -713,6 +713,36 @@
   21 MB×2 的激活读写;需 per-expert 进度原子与 SiLU 融合 epilogue,是尾波问题的
   结构级终解。</blockquote>
 
+  <h3>协作攻坚 · R28 尾波拆分(3D K-split + 跨 CTA 归并)——实现正确,结构性负结果(2026-08-01 深夜)</h3>
+  <p><strong>实现</strong>(评审 3 blocker + 5 must-fix 全部吸收):调度器升为 3D 契约
+  <code>(m_block, n_block, [k_lo, k_hi))</code>,尾轮 tile 切成 S 个 K 片;累加谓词与
+  tmem_full 触发改锚 <code>k_lo/k_hi</code>;全员写 f32 partial(寄存器序布局)→
+  <code>__threadfence</code> + 单线程取票 → 静态归并者(s=S−1)自旋汇合 → 归并存储;
+  workspace 每设备泄漏式分配 + 奇偶双缓冲防 PDL 跨发射竞态,merger 自清计数器
+  (零每发射 host 操作);knob <code>tune_tail_split</code> 置于 cd64/w16 门之外,
+  host 守卫封死空片(S ≤ num_kb 且整除)。<strong>正确性:7/7 逐位一致(maxrel=0),
+  含 amax/single/K=512/自动钳制各角。</strong></p>
+  <p><strong>三轮协议迭代(全部实测)</strong>:① 每线程 atomicAdd + 128 线程裸自旋:
+  同一 cache line 上 S×128 次 RMW + 连续 volatile 轰炸 ≈ 15 µs/piece 纯争用 →
+  改单线程取票 + nanosleep 退避自旋(spin 降至 1.8 µs);② forceinline 使热路径
+  寄存器 56→80/92 + 栈溢出(kernel 级统一分配)→ <code>__noinline__</code> 隔离;
+  ③ 归并收集 LDG 被 per-subtile 屏障卡成 8 次串行 L2 往返(13.0 µs)→ 收集提到
+  屏障前发射(9.4 µs)。</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位</th><th class="num">S=0</th><th class="num">S=2</th><th class="num">S=4</th></tr>
+    <tr><td>8k gate_up(rem=24)</td><td class="num">51.64</td><td class="num">63.06</td><td class="num">85.55(收集数组 128 reg 溢出)</td></tr>
+    <tr><td>8k down(rem=48)</td><td class="num">28.67</td><td class="num">45.93</td><td class="num">28.67(钳制关闭)</td></tr>
+    <tr><td>16k gate_up(rem=48)</td><td class="num">66.05</td><td class="num">66.20</td><td class="num">66.01(钳制)</td></tr>
+  </table></div>
+  <blockquote><strong>R28 结论(相位探针定量)</strong>:归并链固定成本 = TMEM 排空+STG
+  4.0 + 自旋 1.8 + 归并存储 9.4 ≈ <b>15 µs/合并 tile</b>,而拆分一个 13.5 µs 的 tile
+  最多省 13.5×(1−1/S) ≤ 10 µs——<b>在本内核的 tile 尺度上,跨 CTA f32 归并的固定
+  成本不低于一个整 tile 的价值</b>,理论最优(merge 压到 ~3-4 µs)也只是 S=2 打平。
+  16k 的「+0.3 免费」正是同一算术:piece 链 ≈ 整 tile。归档为 opt-in 负结果
+  (默认 S=0 路径逐字节未动,四点位与基线全等);3D 调度器管道保留。
+  <strong>尾波的正解由此进一步指向 megafusion</strong>:同核跨层取整 tile,
+  没有拆分就没有归并税。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
