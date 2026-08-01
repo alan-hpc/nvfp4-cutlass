@@ -799,6 +799,23 @@
   才能这么切。<b>wave-ceil 的可行解仍是 megafusion(跨层整 tile 填尾波,R27/R28 已论证);
   交付退化是 16k 的下一个测量目标。</b></blockquote>
 
+  <h3>协作攻坚 · R30 单核约束下的上界测量——transform-free 天花板(2026-08-01 深夜)</h3>
+  <p>用户约束:不考虑 fusion,只做单 kernel。新仪器 <code>tune_timing_probe=4</code>:
+  transform 计算整体跳过、屏障流量保持(结果作废)——给出「transform 无限快」时的
+  流水线极限,<b>任何 transform 加速方案的收益上界</b>:</p>
+  <div class="tablewrap"><table>
+    <tr><th>点位</th><th class="num">dual</th><th class="num">transform-free 上界</th><th class="num">余量</th><th class="num">对照 mxfp8</th></tr>
+    <tr><td>2k gate_up</td><td class="num">18.46</td><td class="num">14.35</td><td class="num">+4.1(22%)</td><td class="num">18.37</td></tr>
+    <tr><td>8k gate_up</td><td class="num">51.56</td><td class="num"><strong>38.92</strong></td><td class="num">+12.6(24%)</td><td class="num"><strong>38.49——追平</strong></td></tr>
+    <tr><td>16k gate_up</td><td class="num">66.10</td><td class="num"><strong>49.29</strong></td><td class="num">+16.8(25%)</td><td class="num">55.28——反超</td></tr>
+    <tr><td>8k down</td><td class="num">28.67</td><td class="num">22.54</td><td class="num">+6.1(21%)</td><td class="num">26.82——反超</td></tr>
+    <tr><td>16k down</td><td class="num">45.36</td><td class="num">36.21</td><td class="num">+9.1(20%)</td><td class="num">45.11——反超</td></tr>
+  </table></div>
+  <p><strong>判读</strong>:transform 若离开关键路径,prefill 全点位追平或反超 mxfp8——
+  R29 的「wave-ceil 运气 + 交付退化」都排在它之后。单核剩余杠杆唯一的大项:
+  <b>epilogue warp 动态偷 transform slot</b>(4 warp 每 tile 空等 12.5 µs,
+  +25% transform 带宽的机会),对抗评审进行中。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

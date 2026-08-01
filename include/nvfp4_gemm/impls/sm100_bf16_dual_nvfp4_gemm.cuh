@@ -662,7 +662,11 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         smem_sfa0[stage_idx],
                         smem_sfa1[stage_idx],
                         transform_tid);
-                else
+                // kTimingProbe == 4 drops the transform compute entirely
+                // (WRONG RESULTS -- measures the pipeline's transform-free
+                // ceiling, i.e. the upper bound any transform speedup can
+                // reach).  Barrier traffic stays intact.
+                else if constexpr (kTimingProbe != 4)
                     transform::transform_a_tile<
                         BLOCK_M,
                         BLOCK_K,
