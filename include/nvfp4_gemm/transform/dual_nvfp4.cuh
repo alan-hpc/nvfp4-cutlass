@@ -472,7 +472,7 @@ CUTLASS_DEVICE void decompose_block_packed_x2(const uint32_t (&xa)[kBlockSize / 
 /// extra reduction in the transform shows up 1:1 in kernel latency).  With one
 /// atom per thread the warp count is capped at 8 by task count; halving the
 /// slot doubles the usable warps to 16.
-template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true, bool kPairDecompose = true, bool kHalfWorkProbe = false>
+template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true, bool kPairDecompose = true, bool kHalfWorkProbe = false, bool kQuarterChainProbe = false>
 CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
                                      uint8_t*             smem_a0,
                                      uint8_t*             smem_a1,
@@ -554,7 +554,47 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
             uint32_t s0ca, s0cb, s1ca, s1cb;
             uint32_t q0a[kBlockSize / 8], q0b[kBlockSize / 8];
             uint32_t q1a[kBlockSize / 8], q1b[kBlockSize / 8];
-            if constexpr (kHalfWorkProbe)
+            if constexpr (kQuarterChainProbe)
+            {
+                // Timing probe: one 8-element micro chain per thread (a single
+                // LDS group's amax, s0 and packed q0 word), every output slot
+                // filled by duplication (WRONG RESULTS).  Targets the ~190ns
+                // chain the R37 response curve says closes the idle window.
+                const __nv_bfloat162 h0 =
+                    __hmax2(__habs2(*reinterpret_cast<const __nv_bfloat162*>(&ba[0])),
+                            __habs2(*reinterpret_cast<const __nv_bfloat162*>(&ba[1])));
+                const __nv_bfloat162 h1 =
+                    __hmax2(__habs2(*reinterpret_cast<const __nv_bfloat162*>(&ba[2])),
+                            __habs2(*reinterpret_cast<const __nv_bfloat162*>(&ba[3])));
+                const __nv_bfloat162 hm = __hmax2(h0, h1);
+                const uint32_t       hs = __byte_perm(*reinterpret_cast<const uint32_t*>(&hm), 0, 0x1032);
+                const float          amax =
+                    __bfloat162float(__hmax2(hm, *reinterpret_cast<const __nv_bfloat162*>(&hs)).x);
+                s0ca            = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kS0FloorDerivedDiv8));
+                const float s0f = __int_as_float((s0ca << 20) + 0x3C000000u);
+                const __nv_bfloat162 inv2 = __float2bfloat162_rn(math::fast_rcp(s0f));
+                uint32_t             u[4];
+#pragma unroll
+                for (uint32_t j = 0; j < 4; ++j)
+                {
+                    const __nv_bfloat162 v =
+                        __hmul2(*reinterpret_cast<const __nv_bfloat162*>(&ba[j]), inv2);
+                    u[j] = *reinterpret_cast<const uint32_t*>(&v);
+                }
+                const uint32_t w0 = ptx::cvt_e2m1x8_bf16x2(u[0], u[1], u[2], u[3]);
+#pragma unroll
+                for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+                {
+                    q0a[w] = w0;
+                    q0b[w] = w0;
+                    q1a[w] = 0;
+                    q1b[w] = 0;
+                }
+                s0cb = s0ca;
+                s1ca = ptx::cvt_e4m3(s0f / kResidualRadix<kScalePolicy>);
+                s1cb = s1ca;
+            }
+            else if constexpr (kHalfWorkProbe)
             {
                 // Timing probe: run the full dual chain on block A only and
                 // duplicate its outputs for block B (WRONG RESULTS).  Halves

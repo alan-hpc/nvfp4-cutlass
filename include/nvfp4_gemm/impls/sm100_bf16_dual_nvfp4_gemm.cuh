@@ -174,7 +174,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     // tensor-core idle window).  kTimingProbe == 8 instead halves the element
     // math (full dual chain on one block, outputs duplicated for the other).
     // 7 and 9 are 6 and 8 plus the probe-3 clocks, pairing against probe 3.
-    constexpr bool kClockProbe = kTimingProbe == 3 or kTimingProbe == 7 or kTimingProbe == 9;
+    constexpr bool kClockProbe =
+        kTimingProbe == 3 or kTimingProbe == 7 or kTimingProbe == 9 or kTimingProbe == 11;
     unsigned long long probe_wait = 0, probe_work = 0, probe_iters = 0;
     auto probe_flush = [&](uint32_t role) {
         if constexpr (kClockProbe)
@@ -741,7 +742,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 // reach).  Barrier traffic stays intact.
                 // kTimingProbe == 6/7 shorten the chain to the single-pass
                 // form (q1 = 0 stored, s1 real); 8/9 halve the element math
-                // instead (one block's full dual chain, outputs duplicated).
+                // instead (one block's full dual chain, outputs duplicated);
+                // 10/11 run one 8-element micro chain (~190ns target).
                 // The MMA side keeps SFA1 UTCCP and both UMMA passes either
                 // way -- traffic and protocol identical, only the transform
                 // recurrence shrinks (WRONG RESULTS).
@@ -755,7 +757,8 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         kScalePolicy,
                         kEnableResidualPass and kTimingProbe != 6 and kTimingProbe != 7,
                         true,
-                        kTimingProbe == 8 or kTimingProbe == 9>(
+                        kTimingProbe == 8 or kTimingProbe == 9,
+                        kTimingProbe == 10 or kTimingProbe == 11>(
                         smem_a[slot_sh],
                         smem_a0[slot_pr],
                         smem_a1[slot_pr],

@@ -932,6 +932,22 @@
   e2e 真实加速上限的排序不变:预量化 A(到 496 地板,−26%)&gt; 半计算(不可达)&gt;
   单遍降精度(43.04,现成)&gt; 契约内既有终态(47.2)。</p>
 
+  <h3>R38(档案实验续):微链探针 —— work 地板 335ns,idle 关掉 2/3 后骨架接管</h3>
+  <p>目标:按 R37 拟合把链压到 ~190ns 验证 idle 归零。probe10/11:每线程只跑一条
+  8 元素微链(1×LDS 词组 → 2 层 amax 树 → s0 → rcp → 4×hmul → 1 个 cvt 打包字),
+  输出复制填满,存储/UTCCP/双遍 UMMA/屏障逐字节同构。</p>
+  <div class="tablewrap"><table>
+    <tr><th>8k gate_up 完整阶梯</th><th class="num">work (ns)</th><th class="num">period</th><th class="num">e2e (µs)</th><th class="num">暴露 E</th></tr>
+    <tr><td>基线 / probe6 / probe8</td><td class="num">575 / 505 / 442</td><td class="num">754 / 712 / 665</td><td class="num">47.17 / 45.15 / 42.94</td><td class="num">258 / 216 / 169</td></tr>
+    <tr><td><b>R38 probe10 微链</b></td><td class="num"><b>335</b></td><td class="num"><b>584</b></td><td class="num"><b>39.02(−17.3%)</b></td><td class="num"><b>88</b>(拟合预测 99)</td></tr>
+    <tr><td>probe4 零链地板</td><td class="num">~0</td><td class="num">496</td><td class="num">34.82</td><td class="num">0</td></tr>
+  </table></div>
+  <p>判决:(1) <b>work 压不到 190</b> —— 微链计算只剩 ~100ns,其余 ~235ns 是
+  st.128×8 + SF 存储 + LDS/循环/fence 的刚性骨架;transform 线程只要承担存储义务,
+  W&lt;~300 物理不存在,而归零需要 W≤190 &lt; 骨架地板 ——「契约内关不掉 idle」的最终证明。
+  (2) 16k gu 61.55→51.26(−16.7%)。(3) 瓶颈换位:⑦ 等 A 的 wait 167→243ns,
+  DMA 交付开始接管节拍。图:transform-warp-timeline-r38.drawio。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
