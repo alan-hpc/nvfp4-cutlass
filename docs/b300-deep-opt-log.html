@@ -981,6 +981,34 @@
   gaussian 实测结论同构。<b>保留 derived_div8 默认</b>;div4_radix8 作为已落地、
   零速度成本的候选策略留给模型级(PPL/下游任务)评估定夺 —— 分析页的原建议成立。</blockquote>
 
+  <h3>当前终态完整性能表(2026-08-02 午,R40 后 HEAD,单会话统一口径重测)</h3>
+  <p><b>口径</b>(不对齐,按各自最优惠 → 最诚实排列):<b>dual / single</b> =
+  CUDA graph-replay 全调用,输入 BF16 激活,量化在核内 fused;
+  <b>mxfp8k</b> = kineto 只计 gemm kernel 本体(不含每调用的 SF ue8m0 布局变换,
+  也不含 bf16→fp8 激活量化 —— 对 mxfp8 最优惠);
+  <b>mxfp8g</b> = graph-replay 全 API 调用(含 per-call SF 变换 ~6-14µs,
+  仍不含 bf16→fp8 激活量化)。DeepGEMM fp8_fp4 配置 QuantConfig(128,32)+recipes,
+  同 routed 分布同 GPU。<b>此前散见的 mxfp8 参考值(36.97/55.33/16.22 等)系混合口径,
+  以本表为准</b>(旧 prefill 值 ≈ mxfp8g 列:37.00/50.64 对上 36.97/55.33)。</p>
+  <div class="tablewrap"><table>
+    <tr><th>gate_up(N=1024,K=2048)</th><th class="num">dual</th><th class="num">single</th><th class="num">mxfp8k(gemm-only)</th><th class="num">mxfp8g(full-call)</th></tr>
+    <tr><td>decode 16 / 32 / 128</td><td class="num"><b>10.25 / 10.27 / 14.40</b></td><td class="num">10.25 / 10.26 / 14.37</td><td class="num">10.90 / 11.69 / 17.92</td><td class="num">24.62 / 24.62 / 29.72</td></tr>
+    <tr><td>prefill 2k / 8k / 16k</td><td class="num">18.47 / 48.33 / 62.88</td><td class="num">18.33 / 43.43 / 56.76</td><td class="num"><b>17.96 / 25.44 / 35.44</b></td><td class="num">29.00 / 37.00 / 50.64</td></tr>
+    <tr><th>down(N=2048,K=512)</th><th class="num">dual</th><th class="num">single</th><th class="num">mxfp8k</th><th class="num">mxfp8g</th></tr>
+    <tr><td>decode 16 / 32 / 128</td><td class="num"><b>7.16 / 7.26 / 10.26</b></td><td class="num">7.16 / 8.16 / 10.27</td><td class="num">7.61 / 10.04 / 13.09</td><td class="num">14.36 / 15.07 / 18.46</td></tr>
+    <tr><td>prefill 2k / 8k / 16k</td><td class="num">14.35 / 26.67 / 41.49</td><td class="num">12.32 / 24.59 / 36.95</td><td class="num"><b>12.86 / 17.39 / 27.33</b></td><td class="num">18.47 / 25.80 / 36.93</td></tr>
+    <tr><td>精度(cosine vs f32)</td><td class="num"><b>0.9954</b></td><td class="num">0.9910</td><td class="num" colspan="2">0.9546</td></tr>
+  </table></div>
+  <p><b>判定</b>:(1) <b>decode 全 6 点领先</b> —— 即使对 mxfp8 最优惠的 gemm-only
+  口径(gu −6~−20%,down −6~−28%),对 full-call 口径领先 44~58%。
+  (2) prefill 2k:与 mxfp8k 平手(gu −3%/down +12%),对 mxfp8g 全面反超。
+  (3) prefill 大 M 是已定性的结构差距(1B vs 2B 激活交付 + transform 链,
+  R26/R30/R38):gu 落后 1.90×/1.77×(kernel-only)或 1.31×/1.24×(full-call);
+  down 落后 1.53×/1.52× 或 1.03×/1.12×。(4) 若计入 mxfp8 缺失的 bf16→fp8
+  激活量化(本表两列都未含),对称口径下 down prefill 与 mxfp8 持平、
+  8k/16k gate_up 差距进一步收窄至 R37/R38 曲线预测的区间。
+  精度维度恒定:dual 误差为 single 的 1/2、mxfp8 的 1/10。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
