@@ -962,6 +962,25 @@
   尾波问题的真解仍是 megafusion(960t ceil-7 + 免激活往返)——它顺带重塑波形,
   单独为尾波建 cluster 交换协议不值。</p>
 
+  <h3>R40:div4_radix8 policy(s0=amax/4,×8 残差)—— 实现落地,GEMM 级精度打平,速度零差</h3>
+  <p>理论:T=4 只用 E2M1 网格 |u|≤4 的半区(最大间隙 1 而非 4-6 之间的 2),
+  max|e0| 减半、×8 残差 r≤4 永不裁剪,worst-case M/24→M/64(2.67×)。
+  实现:新增 ScalePolicy::Div4Radix8(<code>scale_policy="div4_radix8"</code>),
+  仅换 s0 除数常量(kInvS0Div&lt;policy&gt;),radix/floor/整数解码/指数场 bump 全部复用,
+  normal 与 swap 两条 launcher 打通,默认不变(90ea752)。</p>
+  <div class="tablewrap"><table>
+    <tr><th>精度(2k gu,vs f32 参考)</th><th class="num">derived_div8</th><th class="num">div4_radix8</th><th class="num">single-pass</th></tr>
+    <tr><td>gaussian:cos / max|e|/rms / p99</td><td class="num">0.995401 / 0.517 / 0.2474</td><td class="num">0.995412 / 0.534 / 0.2472</td><td class="num">0.990971 / 0.753 / 0.346</td></tr>
+    <tr><td>outlier 0.5%×32:cos / max / p99</td><td class="num">0.995401 / 0.739 / 0.2763</td><td class="num">0.995331 / 0.721 / 0.2781</td><td class="num">0.992211 / 0.945 / 0.348</td></tr>
+  </table></div>
+  <p>速度:prefill gu/dn 2k/8k/16k 与 decode 16/128 gu/dn 共 10 点全部 Δ≤0.01µs
+  (16k gu +0.65 在既知抖动带内)—— 单常量替换,零成本,符合预期。</p>
+  <blockquote>判决:per-element worst-case 界的 2.67× 改善<b>没有传导到 GEMM 级指标</b>
+  —— 点积误差由方差主导,T=6 更细的最小修正量(M/96 vs M/64)在典型数据上抵消了
+  尾部收益;两种数据分布上 cos/p99 均为 wash(±7e-5)。与此前 derived_div4 的
+  gaussian 实测结论同构。<b>保留 derived_div8 默认</b>;div4_radix8 作为已落地、
+  零速度成本的候选策略留给模型级(PPL/下游任务)评估定夺 —— 分析页的原建议成立。</blockquote>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
