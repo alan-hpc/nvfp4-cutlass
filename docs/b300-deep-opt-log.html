@@ -948,6 +948,20 @@
   (2) 16k gu 61.55→51.26(−16.7%)。(3) 瓶颈换位:⑦ 等 A 的 wait 167→243ns,
   DMA 交付开始接管节拍。图:transform-warp-timeline-r38.drawio。</p>
 
+  <h3>R39(测量定界,NO-GO):尾波 split-N 异构 tile —— 毛上限 3.15µs,不抵重构成本</h3>
+  <p>动机:8k gu 尾波 +39%(320t/148SM,24 个 SM 背第 3 块)。同 kernel 异构 BLOCK_N
+  编译期不可能,三个可实现形态全部定界:</p>
+  <div class="tablewrap"><table>
+    <tr><th>候选</th><th class="num">实测/推算</th><th>判决</th></tr>
+    <tr><td>(A) 尾波 bn128 二次 kernel(PDL 链)</td><td class="num">bn128 period 684ns/kb(全程 65.75µs);尾波毛利 ~1.1µs &lt; PDL 异构 cubin 代价 3-5µs(R27)</td><td><b>死</b></td></tr>
+    <tr><td>(B) cluster_n=2 对内拆 transform + DSMEM 交换</td><td class="num">精确 2 波对照 296t=34.82 → 尾波价值 12.35µs;拆半地板 16kb×575(R38 曲线)=9.2 → 毛上限 <b>+3.15µs</b>;st.async 交换 + cluster 屏障属 R17/R19 实测的 0.6-1.9µs/类交接税,仅 24/74 cluster 受益,16k 尾波本就只 +6.4%</td><td><b>NO-GO:预计净 1-2µs,多周级重构</b></td></tr>
+    <tr><td>(C) 尾波 K-split</td><td class="num">R28:合并链 ~15µs &gt; tile 价值 13.5µs</td><td>已死,不复议</td></tr>
+  </table></div>
+  <p>附带校准:wave 模型再次严丝合缝(尾波价值 12.35 ≈ 单波 12.06 + 抖动);bn128
+  period 684 证实细 tile 回收 9% 但波数翻倍全数吐回(65.75 vs 47.18,R26 结论复核)。
+  尾波问题的真解仍是 megafusion(960t ceil-7 + 免激活往返)——它顺带重塑波形,
+  单独为尾波建 cluster 交换协议不值。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>
