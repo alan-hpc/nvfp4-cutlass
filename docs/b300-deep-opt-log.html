@@ -911,6 +911,27 @@
   「fused 单核 + 逐 tile 片上双 NVFP4 变换」的设计契约下,这就是结构地板。
   精度恒定:0.9954(误差为标准 NVFP4 的 1/2、mxfp8 的 1/10)。</blockquote>
 
+  <h3>R37(战役后档案实验):链长-period 响应曲线 —— 442ns 链下空窗仍在,兑换率 0.65</h3>
+  <p>问题:把 Algorithm 1 压到 ~400ns,idle 是否消失?方法:两个新 wrong-result probe,
+  存储/UTCCP/双遍 UMMA/屏障协议全保留,只缩计算链 ——
+  <b>probe6</b> 砍残差数学(q1=0 照存,s1 真值),<b>probe8</b> 砍半元素计算
+  (每线程只算 1 块的完整双遍链,第 2 块复制输出);7/9 为对应 + probe3 时钟。</p>
+  <div class="tablewrap"><table>
+    <tr><th>8k gate_up 阶梯</th><th class="num">tfm work (ns)</th><th class="num">period (ns/kb)</th><th class="num">e2e (µs)</th><th class="num">暴露 = period−496</th></tr>
+    <tr><td>dual 基线</td><td class="num">575</td><td class="num">754</td><td class="num">47.18</td><td class="num">258</td></tr>
+    <tr><td>probe6 无残差链</td><td class="num">505</td><td class="num">712</td><td class="num">45.15(−2.03)</td><td class="num">216</td></tr>
+    <tr><td>probe8 半元素计算</td><td class="num">442</td><td class="num">665</td><td class="num">42.94(−4.24)</td><td class="num">169</td></tr>
+    <tr><td>probe4 零链(exec 地板)</td><td class="num">~0</td><td class="num">496</td><td class="num">34.82(−12.36)</td><td class="num">0</td></tr>
+  </table></div>
+  <p>三个发现:(1) <b>442ns 链下空窗没有消失</b> —— 仍有 ~169ns/kb 暴露;链每砍 100ns
+  period 只回收 ~65ns(三点斜率一致 0.60-0.67),因为砍掉的链约 1/3 本就藏在 exec 下面。
+  (2) 残差数学只值 70ns(575→505),不是直觉的 35% —— issue-bound 下被 ILP 吸收;
+  链的大头是 LDS + amax + q0 + store 骨架。(3) <b>probe8(42.94)≈ single-pass(43.04)</b>:
+  442ns 双遍链可与「砍掉整个第二遍」打平 —— 但真实实现需要每线程 1 块 = tw32,
+  超出 1024 线程/CTA 上限,该点位在契约内不可达。16k gu 同构:62.89→55.52(−7.36,−11.7%)。
+  e2e 真实加速上限的排序不变:预量化 A(到 496 地板,−26%)&gt; 半计算(不可达)&gt;
+  单遍降精度(43.04,现成)&gt; 契约内既有终态(47.2)。</p>
+
   <h3>循环终局宣告</h3>
   <blockquote>
     <strong>判据满足：轮次 14–23 连续十轮无性能提升，优化循环收敛。</strong><br><br>

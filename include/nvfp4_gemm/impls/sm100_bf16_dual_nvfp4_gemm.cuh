@@ -168,9 +168,16 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
     // kTimingProbe == 3: per-role clock accounting.  Lane 0 of one warp per
     // role accumulates wait/work cycles locally and flushes once per tile, so
     // the instrumentation itself stays off the fast path.
+    // kTimingProbe == 6 shortens the transform chain to its single-pass form
+    // while PRESERVING all stores, UTCCP copies and both UMMA passes (WRONG
+    // RESULTS -- measures whether a shorter Algorithm 1 chain closes the
+    // tensor-core idle window).  kTimingProbe == 8 instead halves the element
+    // math (full dual chain on one block, outputs duplicated for the other).
+    // 7 and 9 are 6 and 8 plus the probe-3 clocks, pairing against probe 3.
+    constexpr bool kClockProbe = kTimingProbe == 3 or kTimingProbe == 7 or kTimingProbe == 9;
     unsigned long long probe_wait = 0, probe_work = 0, probe_iters = 0;
     auto probe_flush = [&](uint32_t role) {
-        if constexpr (kTimingProbe == 3)
+        if constexpr (kClockProbe)
         {
             if (probe_buf != nullptr and lane_idx == 0)
             {
@@ -356,7 +363,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
             for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
-                const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t0 = kClockProbe ? clock64() : 0;
                 empty_barriers[stage_idx]->wait(phase ^ 1);
                 if constexpr (kShallowStages != kNumStages)
                     // The A slot (t mod shallow) recycles from logical
@@ -365,7 +372,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     // smem_a after arrive0 -- excluded in v1, documented so
                     // it stays excluded.)  Shadow parity, no ^1.
                     transform_full_barriers[stage_sh]->wait(phase_sh);
-                const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t1 = kClockProbe ? clock64() : 0;
 
                 const uint32_t k_idx = k_block_idx * BLOCK_K;
 
@@ -409,7 +416,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 num_arrival_bytes += BLOCK_N * kNumKAtoms * sizeof(uint32_t);
 
                 full_barriers[stage_idx]->arrive_and_expect_tx(num_arrival_bytes);
-                if constexpr (kTimingProbe == 3)
+                if constexpr (kClockProbe)
                 {
                     probe_wait += probe_t1 - probe_t0;
                     probe_work += clock64() - probe_t1;
@@ -475,7 +482,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             {
                 // Split pipeline: pass 0 launches on A0/SFA0/SFB readiness while
                 // the transform warps still quantize the residual.
-                const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t0 = kClockProbe ? clock64() : 0;
                 if constexpr (kSplitTransform and kEnableResidualPass)
                     a0_full_barriers[stage_idx]->wait(phase);
                 else
@@ -484,7 +491,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 // issue, and the transform no longer vouches for it.  Lands
                 // well before the transform finishes -- fast-path.
                 full_barriers[stage_idx]->wait(phase);
-                const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t1 = kClockProbe ? clock64() : 0;
                 ptx::tcgen05_after_thread_sync();
 
                 const auto a0_base_lo = ptx::exchange(a0_desc_lo, slot_pr);
@@ -618,7 +625,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 if (k_block_idx == k_hi - 1)
                     cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(tmem_full_barriers[accum_stage_idx]));
                 __syncwarp();
-                if constexpr (kTimingProbe == 3)
+                if constexpr (kClockProbe)
                 {
                     probe_wait += probe_t1 - probe_t0;
                     probe_work += clock64() - probe_t1;
@@ -681,7 +688,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const uint32_t k_lo = scheduler.k_block_lo, k_hi = scheduler.k_block_hi;
             for (uint32_t k_block_idx = k_lo; k_block_idx < k_hi; advance_pipeline(k_block_idx))
             {
-                const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t0 = kClockProbe ? clock64() : 0;
                 if constexpr (kDirectGlobalA)
                     full_barriers[stage_idx]->wait(phase);
                 else
@@ -691,7 +698,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                     // wait its UMMA reads (the empty commit covers UTCCP and
                     // both MMA passes).  Fast-path in steady state.
                     empty_barriers[stage_pr]->wait(phase_pr);
-                const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
+                const auto probe_t1 = kClockProbe ? clock64() : 0;
 
                 if constexpr (kSplitTransform and kEnableResidualPass and not kDirectGlobalA)
                 {
@@ -732,6 +739,12 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 // (WRONG RESULTS -- measures the pipeline's transform-free
                 // ceiling, i.e. the upper bound any transform speedup can
                 // reach).  Barrier traffic stays intact.
+                // kTimingProbe == 6/7 shorten the chain to the single-pass
+                // form (q1 = 0 stored, s1 real); 8/9 halve the element math
+                // instead (one block's full dual chain, outputs duplicated).
+                // The MMA side keeps SFA1 UTCCP and both UMMA passes either
+                // way -- traffic and protocol identical, only the transform
+                // recurrence shrinks (WRONG RESULTS).
                 else if constexpr (kTimingProbe != 4)
                     transform::transform_a_tile<
                         BLOCK_M,
@@ -740,7 +753,9 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                         kSwizzleABMode,
                         kNumTransformThreads,
                         kScalePolicy,
-                        kEnableResidualPass>(
+                        kEnableResidualPass and kTimingProbe != 6 and kTimingProbe != 7,
+                        true,
+                        kTimingProbe == 8 or kTimingProbe == 9>(
                         smem_a[slot_sh],
                         smem_a0[slot_pr],
                         smem_a1[slot_pr],
@@ -752,7 +767,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
                 // shared memory through the async proxy.
                 cutlass::arch::fence_view_async_shared();
                 transform_full_barriers[stage_idx]->arrive();
-                if constexpr (kTimingProbe == 3)
+                if constexpr (kClockProbe)
                 {
                     if (warp_idx == kFirstTransformWarp)
                     {
@@ -781,7 +796,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             const auto accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
             const auto accum_phase_idx = (scheduler.current_iter / kNumEpilogueStages) & 1;
 
-            const auto probe_t0 = kTimingProbe == 3 ? clock64() : 0;
+            const auto probe_t0 = kClockProbe ? clock64() : 0;
             if constexpr (kTimingProbe == 5)
             {
                 // Fake-helper probe (results CORRECT): burn a transform-shaped
@@ -808,7 +823,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             }
             else
                 tmem_full_barriers[accum_stage_idx]->wait(accum_phase_idx);
-            const auto probe_t1 = kTimingProbe == 3 ? clock64() : 0;
+            const auto probe_t1 = kClockProbe ? clock64() : 0;
             ptx::tcgen05_after_thread_sync();
 
             // Activations in the contiguous layout are one flat tensor, so the
@@ -858,7 +873,7 @@ CUTLASS_GLOBAL void __launch_bounds__((3 + kNumTransformWarps) * 32 + kNumEpilog
             }
             else
                 store_normal();
-            if constexpr (kTimingProbe == 3)
+            if constexpr (kClockProbe)
             {
                 if (epilogue_warp_idx == 0)
                 {

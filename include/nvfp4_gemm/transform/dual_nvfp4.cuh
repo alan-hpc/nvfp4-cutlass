@@ -472,7 +472,7 @@ CUTLASS_DEVICE void decompose_block_packed_x2(const uint32_t (&xa)[kBlockSize / 
 /// extra reduction in the transform shows up 1:1 in kernel latency).  With one
 /// atom per thread the warp count is capped at 8 by task count; halving the
 /// slot doubles the usable warps to 16.
-template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true, bool kPairDecompose = true>
+template<uint32_t BLOCK_M, uint32_t BLOCK_K, uint32_t kSwizzleAMode, uint32_t kSwizzleA0Mode, uint32_t kNumTransformThreads, ScalePolicy kScalePolicy, bool kEnableResidualPass = true, bool kPairDecompose = true, bool kHalfWorkProbe = false>
 CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
                                      uint8_t*             smem_a0,
                                      uint8_t*             smem_a1,
@@ -554,8 +554,26 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
             uint32_t s0ca, s0cb, s1ca, s1cb;
             uint32_t q0a[kBlockSize / 8], q0b[kBlockSize / 8];
             uint32_t q1a[kBlockSize / 8], q1b[kBlockSize / 8];
-            decompose_block_packed_x2<kScalePolicy, kEnableResidualPass>(
-                ba, bb, q0a, q0b, q1a, q1b, s0ca, s0cb, s1ca, s1cb);
+            if constexpr (kHalfWorkProbe)
+            {
+                // Timing probe: run the full dual chain on block A only and
+                // duplicate its outputs for block B (WRONG RESULTS).  Halves
+                // the element math while stores, UTCCP and both UMMA passes
+                // stay identical -- the ~400ns-chain data point.
+                decompose_block_packed<kScalePolicy, kEnableResidualPass>(
+                    ba, q0a, q1a, s0ca, s1ca);
+#pragma unroll
+                for (uint32_t w = 0; w < kBlockSize / 8; ++w)
+                {
+                    q0b[w] = q0a[w];
+                    q1b[w] = q1a[w];
+                }
+                s0cb = s0ca;
+                s1cb = s1ca;
+            }
+            else
+                decompose_block_packed_x2<kScalePolicy, kEnableResidualPass>(
+                    ba, bb, q0a, q0b, q1a, q1b, s0ca, s0cb, s1ca, s1cb);
 #pragma unroll
             for (uint32_t w = 0; w < kBlockSize / 8; ++w)
             {
