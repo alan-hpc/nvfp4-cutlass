@@ -1,0 +1,70 @@
+<mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1520" pageHeight="830" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="lgc1" value="" style="rounded=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;" vertex="1" parent="1"><mxGeometry x="210" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lgt1" value="transform work(warp 时钟实测)" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="234" y="20" width="210" height="22" as="geometry" /></mxCell>
+    <mxCell id="lgc2" value="" style="rounded=1;fillColor=#FBF3D5;strokeColor=#E3D08F;" vertex="1" parent="1"><mxGeometry x="470" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lgt2" value="mbarrier 唤醒 60ns" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="494" y="20" width="140" height="22" as="geometry" /></mxCell>
+    <mxCell id="lgc3" value="" style="rounded=1;fillColor=#CDE7CD;strokeColor=#7FA87F;" vertex="1" parent="1"><mxGeometry x="660" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lgt3" value="Tensor Core exec(UMMA 背靠背)" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="684" y="20" width="220" height="22" as="geometry" /></mxCell>
+    <mxCell id="lgc4" value="" style="rounded=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="930" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lgt4" value="Tensor Core idle" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="954" y="20" width="120" height="22" as="geometry" /></mxCell>
+    <mxCell id="lgc5" value="" style="rounded=1;fillColor=#FFFFFF;strokeColor=#BBBBBB;dashed=1;" vertex="1" parent="1"><mxGeometry x="1100" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="lgt5" value="arrive + try_wait" style="text;html=1;fontSize=13;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="1124" y="20" width="130" height="22" as="geometry" /></mxCell>
+
+    <mxCell id="ttl" value="R37 链长-period 响应曲线(8k gate_up 实测):transform work 575→505→442→0 ns ⇒ period 754→712→665→496 ns/kb · 每组上行 = transform warp,下行 = Tensor Core · 横轴 1px=1ns" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=15;fontStyle=1;fontColor=#1B7A2F" vertex="1" parent="1">
+      <mxGeometry x="10" y="46" width="1500" height="26" as="geometry" />
+    </mxCell>
+
+    <mxCell id="axa" value="0" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="195" y="76" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="axb" value="200" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="395" y="76" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="axc" value="400" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="595" y="76" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="axd" value="496" style="text;html=1;fontSize=10;align=center;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="691" y="76" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="axe" value="600" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="795" y="76" width="30" height="16" as="geometry" /></mxCell>
+    <mxCell id="axf" value="754 ns" style="text;html=1;fontSize=10;align=center;fontColor=#888888" vertex="1" parent="1"><mxGeometry x="944" y="76" width="40" height="16" as="geometry" /></mxCell>
+
+    <mxCell id="g1lb" value="① dual 基线&#10;probe=0" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="100" width="190" height="60" as="geometry" /></mxCell>
+    <mxCell id="g1wk" value="60" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="210" y="100" width="60" height="24" as="geometry" /></mxCell>
+    <mxCell id="g1tf" value="transform work 575ns:完整 Algorithm 1 双遍链(amax→s0→q0→残差×8→q1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="270" y="100" width="575" height="24" as="geometry" /></mxCell>
+    <mxCell id="g1wt" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=9;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="845" y="100" width="119" height="24" as="geometry" /></mxCell>
+    <mxCell id="g1ex" value="exec 496ns(双遍 tcgen05.mma 背靠背)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="210" y="128" width="496" height="32" as="geometry" /></mxCell>
+    <mxCell id="g1id" value="idle 258" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=10;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="706" y="128" width="258" height="32" as="geometry" /></mxCell>
+    <mxCell id="g1an" value="period 754 ns/kb · e2e 47.18 µs&#10;契约内终态" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fontColor=#444444" vertex="1" parent="1"><mxGeometry x="990" y="100" width="460" height="60" as="geometry" /></mxCell>
+
+    <mxCell id="g2lb" value="② probe6&#10;残差数学移除" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="184" width="190" height="60" as="geometry" /></mxCell>
+    <mxCell id="g2wk" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="210" y="184" width="60" height="24" as="geometry" /></mxCell>
+    <mxCell id="g2tf" value="work 505ns:q1=0 照存、s1 真值 —— 残差链只省 70ns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="270" y="184" width="505" height="24" as="geometry" /></mxCell>
+    <mxCell id="g2wt" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=9;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="775" y="184" width="147" height="24" as="geometry" /></mxCell>
+    <mxCell id="g2ex" value="exec 496" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="210" y="212" width="496" height="32" as="geometry" /></mxCell>
+    <mxCell id="g2id" value="idle 216" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=10;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="706" y="212" width="216" height="32" as="geometry" /></mxCell>
+    <mxCell id="g2an" value="period 712(−42)· e2e 45.15 µs(−2.03)&#10;链砍 70 只回收 42 —— 兑换率 0.60" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fontColor=#444444" vertex="1" parent="1"><mxGeometry x="990" y="184" width="460" height="60" as="geometry" /></mxCell>
+
+    <mxCell id="g3lb" value="③ probe8&#10;元素计算减半" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="268" width="190" height="60" as="geometry" /></mxCell>
+    <mxCell id="g3wk" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="210" y="268" width="60" height="24" as="geometry" /></mxCell>
+    <mxCell id="g3tf" value="work 442ns:1 块真算完整双遍链,第 2 块复制输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="270" y="268" width="442" height="24" as="geometry" /></mxCell>
+    <mxCell id="g3wt" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=9;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="712" y="268" width="163" height="24" as="geometry" /></mxCell>
+    <mxCell id="g3ex" value="exec 496" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="210" y="296" width="496" height="32" as="geometry" /></mxCell>
+    <mxCell id="g3id" value="★idle 169★" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=10;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="706" y="296" width="169" height="32" as="geometry" /></mxCell>
+    <mxCell id="g3an" value="period 665(−89)· e2e 42.94 µs(−4.24)&#10;442ns 链空窗仍在;速度 ≈ single-pass 43.04" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fontColor=#444444" vertex="1" parent="1"><mxGeometry x="990" y="268" width="460" height="60" as="geometry" /></mxCell>
+
+    <mxCell id="g4lb" value="④ probe4&#10;零链(exec 地板)" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="352" width="190" height="60" as="geometry" /></mxCell>
+    <mxCell id="g4wk" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="210" y="352" width="60" height="24" as="geometry" /></mxCell>
+    <mxCell id="g4wt" value="work 0:arrive 立即完成,挂在 try_wait(full_a[s+1])" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="270" y="352" width="436" height="24" as="geometry" /></mxCell>
+    <mxCell id="g4ex" value="exec 496:period 全被 UMMA 填满,idle 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="210" y="380" width="496" height="32" as="geometry" /></mxCell>
+    <mxCell id="g4an" value="period 496(−258)· e2e 34.82 µs(−12.36)&#10;= 预量化 A 的上界(链移出 kernel)" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fontColor=#444444" vertex="1" parent="1"><mxGeometry x="990" y="352" width="460" height="60" as="geometry" /></mxCell>
+
+    <mxCell id="evx" value="" style="rounded=0;fillColor=#2D7600;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="705" y="94" width="3" height="326" as="geometry" /></mxCell>
+    <mxCell id="evxl" value="496 = exec 地板(probe4 实测):idle 的右边界随 period 缩短向它收敛,442ns 链下仍差 169" style="text;html=1;fontSize=11;fontColor=#2D7600;fontStyle=1" vertex="1" parent="1"><mxGeometry x="210" y="422" width="740" height="16" as="geometry" /></mxCell>
+
+    <mxCell id="nb1" value="实验设计(wrong-result probes,协议不变):probe6/8 只缩短 transform 的计算链 —— A0/A1/SFA0/SFA1 存储、SFA1 UTCCP、双遍 tcgen05.mma、全部 mbarrier arrive/wait 原样保留,字节流量与屏障时序不变,因此 period 的变化只反映链长。probe6:残差数学移除(q1=0 照存,s1 真值);probe8:每线程只算 1 个 16-块的完整双遍链,第 2 块复制输出(等效半工作量);probe7/9 = 6/8 + probe3 warp 时钟。结果错误是设计使然,不进任何精度口径。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDFEFF;strokeColor=#B9C7E8;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="448" width="1290" height="96" as="geometry" />
+    </mxCell>
+    <mxCell id="nb2" value="三个发现:(1) 442ns 链下空窗没有消失 —— 仍有 ~169 ns/kb 暴露;三点斜率一致:链每砍 100ns,period 只回收 60-67ns(兑换率 ~0.65),因为被砍的链约 1/3 本来就藏在 exec 之下,只有暴露部分返还。(2) 残差数学(dec→sub→×8→q1)只值 70ns,不是指令数直觉的 ~35% —— issue-bound 下被 ILP 吸收;链的大头是 LDS.128 + amax 树 + q0 打包 + store 骨架。(3) probe8(42.94µs)追平 single-pass(43.04µs):442ns 双遍链在速度上等于砍掉整个第二遍 UMMA;但真实现需要每线程 1 块 = 32 个 transform warp,(3+32)×32+128 = 1248 &gt; 1024 线程/CTA 硬上限 —— 契约内不可达。加速上限排序:预量化 A(496 地板,−26%)&gt; 半计算(不可达)&gt; 单遍降精度(43.04,现成开关)&gt; 契约内终态(47.2)。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8F0;strokeColor=#D79B00;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="554" width="1290" height="140" as="geometry" />
+    </mxCell>
+    <mxCell id="nb3" value="口径:work = probe3/7/9 warp 时钟(tfm work,own-iter 归一,GHz 1.965);period = (e2e − 截距 11µs) / 48kb;exec 地板 496 ns/kb 来自 probe4(R36 图中的 580 含发射重叠;258 = 754 − 496 与账本 invariant ~260ns/kb 吻合)。16k gu 同构:62.89→59.39→55.52→47.07。e2e 为 CUDA graph-replay 中位数,B300 GPU2。稳态单拍全景见 transform-warp-timeline-r36.drawio。" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontColor=#666666;spacing=4" vertex="1" parent="1">
+      <mxGeometry x="160" y="704" width="1290" height="66" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
