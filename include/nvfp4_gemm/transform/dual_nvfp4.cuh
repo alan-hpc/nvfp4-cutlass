@@ -41,12 +41,24 @@ enum class ScalePolicy
     /// Which effect wins is an empirical question -- hence a policy, not a
     /// replacement.
     DerivedDiv4 = 2,
+    /// s0 = Q_e4m3(amax / 4) with the default x8 residual (R40).  q0 then
+    /// spends only the |u| <= 4 half of the E2M1 grid, whose largest gap is 1
+    /// (not the 2 between 4 and 6): max|e0| halves to 1/2, and the x8
+    /// residual r = 8*e0 <= 4 never clips, so max|e1| = 1/16 -- worst case
+    /// M/64 vs the default's M/24.  The price is one wasted q0 code point
+    /// (6) and 1.5x less headroom before the e4m3 s0 encode saturates.
+    Div4Radix8 = 3,
 };
 
 /// Residual radix per policy: how far the normalized residual is scaled up
 /// before its own E2M1 quantization, with s1 derived as s0 / radix.
 template<ScalePolicy kScalePolicy>
 constexpr float kResidualRadix = kScalePolicy == ScalePolicy::DerivedDiv4 ? 4.0f : 8.0f;
+
+/// Reciprocal of the s0 divisor: amax/6 fills the whole E2M1 range (default);
+/// Div4Radix8 trades range for the tighter grid below 4.
+template<ScalePolicy kScalePolicy>
+constexpr float kInvS0Div = kScalePolicy == ScalePolicy::Div4Radix8 ? 0.25f : kInvE2M1Max;
 
 /// Byte offset of element (m, k) inside a K-major, `kSwizzleMode`-swizzled tile.
 ///
@@ -127,7 +139,7 @@ CUTLASS_DEVICE void decompose_block(const float (&x)[kBlockSize],
     constexpr float kFloor = kScalePolicy == ScalePolicy::ResidualAmax
                                  ? 1.0f / 512.0f   // 2^-9, smallest positive E4M3
                                  : kS0FloorDerivedDiv8;
-    s0_code                = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
+    s0_code                = ptx::cvt_e4m3(fmaxf(amax * kInvS0Div<kScalePolicy>, kFloor));
 
     // The reciprocal has to be built from the *rounded* s0, otherwise the kernel
     // and the reference disagree on every block whose amax/6 is not exactly
@@ -255,7 +267,7 @@ CUTLASS_DEVICE void decompose_block_packed(const uint32_t (&xw)[kBlockSize / 2],
     constexpr float kFloor = kScalePolicy == ScalePolicy::ResidualAmax
                                  ? 1.0f / 512.0f
                                  : kS0FloorDerivedDiv8;
-    s0_code            = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
+    s0_code            = ptx::cvt_e4m3(fmaxf(amax * kInvS0Div<kScalePolicy>, kFloor));
     const float s0f    = kScalePolicy == ScalePolicy::ResidualAmax
                              ? ptx::cvt_e4m3_to_f32(s0_code)
                              : __int_as_float((s0_code << 20) + 0x3C000000u);
@@ -391,8 +403,8 @@ CUTLASS_DEVICE void decompose_block_packed_x2(const uint32_t (&xa)[kBlockSize / 
 
     // ---- Phase 2: both scalar chains (the two MUFU rcps pipeline) ----------
     constexpr float kRadix = kResidualRadix<kScalePolicy>;
-    s0ca = ptx::cvt_e4m3(fmaxf(amax_a * kInvE2M1Max, kS0FloorDerivedDiv8));
-    s0cb = ptx::cvt_e4m3(fmaxf(amax_b * kInvE2M1Max, kS0FloorDerivedDiv8));
+    s0ca = ptx::cvt_e4m3(fmaxf(amax_a * kInvS0Div<kScalePolicy>, kS0FloorDerivedDiv8));
+    s0cb = ptx::cvt_e4m3(fmaxf(amax_b * kInvS0Div<kScalePolicy>, kS0FloorDerivedDiv8));
     const float s0fa = __int_as_float((s0ca << 20) + 0x3C000000u);
     const float s0fb = __int_as_float((s0cb << 20) + 0x3C000000u);
     const float inva = math::fast_rcp(s0fa);
@@ -570,7 +582,7 @@ CUTLASS_DEVICE void transform_a_tile(const __nv_bfloat16* smem_a,
                 const uint32_t       hs = __byte_perm(*reinterpret_cast<const uint32_t*>(&hm), 0, 0x1032);
                 const float          amax =
                     __bfloat162float(__hmax2(hm, *reinterpret_cast<const __nv_bfloat162*>(&hs)).x);
-                s0ca            = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kS0FloorDerivedDiv8));
+                s0ca            = ptx::cvt_e4m3(fmaxf(amax * kInvS0Div<kScalePolicy>, kS0FloorDerivedDiv8));
                 const float s0f = __int_as_float((s0ca << 20) + 0x3C000000u);
                 const __nv_bfloat162 inv2 = __float2bfloat162_rn(math::fast_rcp(s0f));
                 uint32_t             u[4];
@@ -783,7 +795,7 @@ CUTLASS_DEVICE void transform_a_tile_split(const __nv_bfloat16* smem_a,
             constexpr float kFloor = kScalePolicy == ScalePolicy::ResidualAmax
                                          ? 1.0f / 512.0f
                                          : kS0FloorDerivedDiv8;
-            const uint32_t s0_code = ptx::cvt_e4m3(fmaxf(amax * kInvE2M1Max, kFloor));
+            const uint32_t s0_code = ptx::cvt_e4m3(fmaxf(amax * kInvS0Div<kScalePolicy>, kFloor));
             const float    inv_s0  = math::fast_rcp(ptx::cvt_e4m3_to_f32(s0_code));
 #pragma unroll
             for (uint32_t i = 0; i < kBlockSize / 2; ++i)

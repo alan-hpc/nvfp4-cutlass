@@ -104,10 +104,11 @@ inline void m_grouped_bf16_dual_nvfp4_gemm_contiguous(const torch::Tensor& a,
     }
 
     NVFP4_HOST_ASSERT_MSG(scale_policy == "derived_div8" or scale_policy == "residual_amax" or
-                              scale_policy == "derived_div4",
-                          "scale_policy must be 'derived_div8', 'derived_div4' or 'residual_amax'");
+                              scale_policy == "derived_div4" or scale_policy == "div4_radix8",
+                          "scale_policy must be 'derived_div8', 'derived_div4', 'div4_radix8' or 'residual_amax'");
     const std::string policy = scale_policy == "residual_amax" ? "ScalePolicy::ResidualAmax"
                                : scale_policy == "derived_div4" ? "ScalePolicy::DerivedDiv4"
+                               : scale_policy == "div4_radix8" ? "ScalePolicy::Div4Radix8"
                                                                 : "ScalePolicy::DerivedDiv8";
 
     sm100_m_grouped_bf16_dual_nvfp4_gemm_contiguous(
