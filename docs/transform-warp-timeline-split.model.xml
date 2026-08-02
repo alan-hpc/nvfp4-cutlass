@@ -1,0 +1,89 @@
+<mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1520" pageHeight="1290" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="slgc1" value="" style="rounded=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;" vertex="1" parent="1"><mxGeometry x="180" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt1" value="A / transform 产物" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="202" y="20" width="120" height="22" as="geometry" /></mxCell>
+    <mxCell id="slgc2" value="" style="rounded=1;fillColor=#E4F2E4;strokeColor=#B5D6B5;" vertex="1" parent="1"><mxGeometry x="340" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt2" value="UMMA / Tensor Core" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="362" y="20" width="130" height="22" as="geometry" /></mxCell>
+    <mxCell id="slgc3" value="" style="rounded=1;fillColor=#FBF3D5;strokeColor=#E3D08F;" vertex="1" parent="1"><mxGeometry x="510" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt3" value="mbarrier arrive / wake" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="532" y="20" width="140" height="22" as="geometry" /></mxCell>
+    <mxCell id="slgc4" value="" style="rounded=1;fillColor=#FFFFFF;strokeColor=#BBBBBB;dashed=1;" vertex="1" parent="1"><mxGeometry x="690" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt4" value="try_wait suspend" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="712" y="20" width="110" height="22" as="geometry" /></mxCell>
+    <mxCell id="slgc5" value="" style="rounded=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;" vertex="1" parent="1"><mxGeometry x="840" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt5" value="Tensor Core idle" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="862" y="20" width="110" height="22" as="geometry" /></mxCell>
+    <mxCell id="slgc6" value="" style="rounded=1;fillColor=#F3EEFA;strokeColor=#9673A6;" vertex="1" parent="1"><mxGeometry x="990" y="22" width="18" height="18" as="geometry" /></mxCell>
+    <mxCell id="slgt6" value="SMEM slot 持有(memory stage)" style="text;html=1;fontSize=12;align=left;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="1012" y="20" width="210" height="22" as="geometry" /></mxCell>
+
+    <mxCell id="sttl" value="Split-transform 模式单拍时序 + SMEM stage 叠加(tune_split_transform=1,存档负收益)· bk128 / tw16 / 逻辑 s4(sh3/pr2)· 横轴示意(split 无 warp 时钟档,e2e 实测见口径)· ①—⑬ 完整说明见图例" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=15;fontStyle=1;fontColor=#8B4A9C" vertex="1" parent="1">
+      <mxGeometry x="10" y="46" width="1500" height="26" as="geometry" />
+    </mxCell>
+
+    <mxCell id="slb1" value="TMA producer&#10;warp 0" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="88" width="135" height="46" as="geometry" /></mxCell>
+    <mxCell id="sbg1" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="88" width="1290" height="46" as="geometry" /></mxCell>
+    <mxCell id="s_tma_w" value="① try_wait(empty[s]) + 影子门 transform_full[t−3]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="93" width="394" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tma_c" value="② cp.async.bulk.tensor ×3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=10" vertex="1" parent="1"><mxGeometry x="560" y="93" width="110" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tma_d" value="③ DMA:tx-count 计字节 → full_a[s] / full[s] phase 翻转" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2F7FF;strokeColor=#B9C7E8;dashed=1;fontSize=10;fontColor=#7A8BB5" vertex="1" parent="1"><mxGeometry x="670" y="93" width="780" height="36" as="geometry" /></mxCell>
+
+    <mxCell id="slb2" value="Transform&#10;warps 3–18 · 两段" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="0" y="144" width="145" height="46" as="geometry" /></mxCell>
+    <mxCell id="sbg2" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="144" width="1290" height="46" as="geometry" /></mxCell>
+    <mxCell id="s_tf_wk" value="④ 唤醒" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="166" y="149" width="60" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tf_p0" value="⑤a phase 0:LDS.128 读 A → amax → s0 → q0 → st.128 A0 + SFA0 字节" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="226" y="149" width="480" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tf_a0" value="⑥a arrive&#10;(a0_full)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="706" y="149" width="50" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tf_p1" value="⑤b phase 1:LDS.128 重读 A → u=x·rcp(s0) 重建 → r → q1 → st.128 A1 + SFA1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E7EEFB;strokeColor=#B9C7E8;fontSize=10" vertex="1" parent="1"><mxGeometry x="756" y="149" width="330" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tf_a1" value="⑥b arrive&#10;(tfm_full)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="1086" y="149" width="50" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tf_w" value="⑦ try_wait(full_a[s+1])" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="1136" y="149" width="314" height="36" as="geometry" /></mxCell>
+
+    <mxCell id="slb3" value="MMA issue&#10;warp 1 · 两波" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="200" width="135" height="46" as="geometry" /></mxCell>
+    <mxCell id="sbg3" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="200" width="1290" height="46" as="geometry" /></mxCell>
+    <mxCell id="s_mma_w1" value="⑧a try_wait(a0_full[s], phase):等 544 arrive —— 第一波门" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="205" width="590" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_mma_i1" value="⑨a UTCCP SFA0+SFB → UMMA pass 1(A0×W)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4F2E4;strokeColor=#B5D6B5;fontSize=10" vertex="1" parent="1"><mxGeometry x="756" y="205" width="180" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_mma_w2" value="⑧b try_wait(tfm_full[s]):等残差 —— 第二波门" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="936" y="205" width="200" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_mma_i2" value="⑨b UTCCP SFA1 → UMMA pass 2(A1×W)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4F2E4;strokeColor=#B5D6B5;fontSize=10" vertex="1" parent="1"><mxGeometry x="1136" y="205" width="160" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_mma_ar" value="⑩ umma_arrive&#10;(empty[s])" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3D5;strokeColor=#E3D08F;fontSize=9" vertex="1" parent="1"><mxGeometry x="1296" y="205" width="70" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_mma_w3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=9;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="1366" y="205" width="84" height="36" as="geometry" /></mxCell>
+
+    <mxCell id="slb4" value="Tensor Core&#10;tcgen05 · async" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="256" width="135" height="46" as="geometry" /></mxCell>
+    <mxCell id="sbg4" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="256" width="1290" height="46" as="geometry" /></mxCell>
+    <mxCell id="s_tc_p" value="执行上一拍 pass 2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="261" width="284" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tc_i1" value="★空窗 1:pass 1 未发射(a0_full 波未凑满)—— 比合并模式早结束,split 的初衷★" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=10;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="450" y="261" width="486" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tc_e1" value="exec pass 1(A0×W)≈290ns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="936" y="261" width="280" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tc_i2" value="★空窗 2:等残差★" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0F0;strokeColor=#E05252;strokeWidth=2;fontSize=9;fontStyle=1;fontColor=#CC2222" vertex="1" parent="1"><mxGeometry x="1216" y="261" width="100" height="36" as="geometry" /></mxCell>
+    <mxCell id="s_tc_e2" value="exec pass 2 → 跨拍" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CDE7CD;strokeColor=#7FA87F;fontSize=10" vertex="1" parent="1"><mxGeometry x="1316" y="261" width="134" height="36" as="geometry" /></mxCell>
+
+    <mxCell id="slb5" value="Epilogue&#10;warps 19–22" style="text;html=1;fontSize=13;fontStyle=1;align=right;verticalAlign=middle" vertex="1" parent="1"><mxGeometry x="10" y="312" width="135" height="46" as="geometry" /></mxCell>
+    <mxCell id="sbg5" value="" style="rounded=1;fillColor=#F7F9FC;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="160" y="312" width="1290" height="46" as="geometry" /></mxCell>
+    <mxCell id="s_epi" value="⑪ 与合并模式相同:try_wait(tmem_full),每 16 拍被尾块 umma_arrive 唤醒 → tcgen05.ld → ×G_W → BF16 → TMA store D(见 r36 图)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CCCCCC;dashed=1;fontSize=10;fontColor=#999999" vertex="1" parent="1"><mxGeometry x="166" y="317" width="1284" height="36" as="geometry" /></mxCell>
+
+    <mxCell id="smemt" value="SMEM stage 叠加(slot 游标 = t mod 深度;R35 异深:A×3 / 产物×2 / B·SFB×4)" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#8B4A9C" vertex="1" parent="1"><mxGeometry x="160" y="368" width="900" height="20" as="geometry" /></mxCell>
+
+    <mxCell id="smlb1" value="A BF16 32KB&#10;slot [t%3] · sh3" style="text;html=1;fontSize=12;fontStyle=1;align=right;verticalAlign=middle;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="10" y="394" width="135" height="42" as="geometry" /></mxCell>
+    <mxCell id="s_m1_h" value="⑫ 持有:phase 0 LDS 读 + phase 1 重读 —— split 把 A 的真依赖延伸到重读结束(合并模式一次读完即无依赖)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3EEFA;strokeColor=#9673A6;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="398" width="970" height="34" as="geometry" /></mxCell>
+    <mxCell id="s_m1_r" value="arrive(tfm_full) 后:等影子门 [t+3] 允许 TMA 覆写" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;dashed=1;fontSize=10;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="1136" y="398" width="314" height="34" as="geometry" /></mxCell>
+
+    <mxCell id="smlb2" value="A0/A1/SFA0/SFA1&#10;slot [t%2] · pr2" style="text;html=1;fontSize=12;fontStyle=1;align=right;verticalAlign=middle;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="10" y="446" width="135" height="42" as="geometry" /></mxCell>
+    <mxCell id="s_m2_e" value="等上一租户被 UMMA 读完(empty[t−2])" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;dashed=1;fontSize=10;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="166" y="450" width="474" height="34" as="geometry" /></mxCell>
+    <mxCell id="s_m2_h" value="⑬ A0/SFA0 写入(phase 0 末)→ pass 1 读;A1/SFA1 写入(phase 1 末)→ pass 2 读" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3EEFA;strokeColor=#9673A6;fontSize=10" vertex="1" parent="1"><mxGeometry x="640" y="450" width="656" height="34" as="geometry" /></mxCell>
+    <mxCell id="s_m2_r" value="empty 释放" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;dashed=1;fontSize=10;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="1296" y="450" width="154" height="34" as="geometry" /></mxCell>
+
+    <mxCell id="smlb3" value="W/SFB 18KB&#10;slot [t%4] · ×4" style="text;html=1;fontSize=12;fontStyle=1;align=right;verticalAlign=middle;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="10" y="498" width="135" height="42" as="geometry" /></mxCell>
+    <mxCell id="s_m3_h" value="前一拍 DMA 写入;pass 1 与 pass 2 都读 W/SFB —— empty 被推迟到 pass 2 发射之后,释放窗整体右移(深 stage 组合的放大项)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3EEFA;strokeColor=#9673A6;fontSize=10" vertex="1" parent="1"><mxGeometry x="166" y="502" width="1130" height="34" as="geometry" /></mxCell>
+    <mxCell id="s_m3_r" value="empty 释放 → TMA ①" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;dashed=1;fontSize=10;fontColor=#9673A6" vertex="1" parent="1"><mxGeometry x="1296" y="502" width="154" height="34" as="geometry" /></mxCell>
+
+    <mxCell id="sev1" value="" style="rounded=0;fillColor=#9673A6;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="755" y="84" width="3" height="456" as="geometry" /></mxCell>
+    <mxCell id="sev1l" value="a0_full[s] 凑满 544 arrive(512 transform + 32 warp2)→ 第一波" style="text;html=1;fontSize=11;fontColor=#9673A6;fontStyle=1" vertex="1" parent="1"><mxGeometry x="480" y="544" width="440" height="16" as="geometry" /></mxCell>
+    <mxCell id="sev2" value="" style="rounded=0;fillColor=#6B3F7A;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="1135" y="84" width="3" height="456" as="geometry" /></mxCell>
+    <mxCell id="sev2l" value="transform_full[s] 凑满 512 arrive → 第二波" style="text;html=1;fontSize=11;fontColor=#6B3F7A;fontStyle=1" vertex="1" parent="1"><mxGeometry x="960" y="544" width="320" height="16" as="geometry" /></mxCell>
+
+    <mxCell id="sleg" value="图例 · 时序框完整说明&#10;① TMA 等待:try_wait(empty[s], phase^1) —— 等 B 槽被 umma_arrive 释放;再过影子门 transform_full[t−3] 确认 A 槽已被两段 transform 全部读完。&#10;② TMA 发射:cp.async.bulk.tensor ×3 —— A(32KB)→full_a,W(16KB)+SFB(2KB)→full;各自 arrive_and_expect_tx 设定字节数。&#10;③ DMA 途中:TMA 引擎按 tx-count 计字节,凑满即 phase 翻转唤醒等待方(A-first 结构与合并模式相同)。&#10;④ Transform 唤醒:full_a[s] 翻转 → 硬件恢复,~60ns。&#10;⑤a phase 0(第一遍量化):LDS.128 读 A → amax=max|x|(VHMNMX 树)→ s0=Q_e4m3(amax/6) → u=x·rcp(s0) → q0=Q_e2m1(u) → st.128 A0 + SFA0;q0 与 scale 字留在寄存器。&#10;⑥a fence.proxy.async + arrive(a0_full[s]) —— split 专属的中途汇报,凑 544(含 warp2 的 SFB 转置完成)。&#10;⑤b phase 1(残差遍):LDS.128 第二次读 A(寄存器放不下整 tile,u 必须重建)→ u=x·rcp(s0) → r=(u−dec(q0))·8 → q1=Q_e2m1(r),s1=s0/8 → st.128 A1 + SFA1。&#10;⑥b fence.proxy.async + arrive(transform_full[s]) —— split 下只收 512 个 transform arrive。&#10;⑦ Transform 等待:try_wait(full_a[s+1]),下一批 A 还在 DMA 路上。&#10;⑧a MMA 第一波门:try_wait(a0_full[s], phase) —— A0/SFA0/SFB 就绪即过,不等残差。&#10;⑨a 第一波发射:UTCCP 拷 SFA0+SFB 进 TMEM → 每 64-K atom 一条 tcgen05.mma.kind::mxf4nvf4.block_scale.block16(A0×W,首块 scale_c=0)。&#10;⑧b MMA 第二波门:try_wait(transform_full[s], phase) —— 等残差量化完成。&#10;⑨b 第二波发射:UTCCP 拷 SFA1 → UMMA(A1×W,恒累加,同一 TMEM 累加器)。&#10;⑩ umma_arrive(empty[s]):两波都发完才释放 —— B 槽与产物槽的释放点比合并模式后移。&#10;⑫ A 槽(sh3):split 把「phase 1 重读」加进 A 的真依赖 —— 槽被占满整个两段窗口;释放仍走 transform_full 影子门 [t+3]。&#10;⑬ 产物槽(pr2):A0 与 A1 分两次写入、分两波被读;empty[t−2] 的等待方(下一拍 transform)因此被闭环到两拍前的第二波发射。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#999999;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="574" width="1290" height="470" as="geometry" />
+    </mxCell>
+
+    <mxCell id="sfnd" value="为什么 split 更慢(实测判决,存档):R24 在均匀 s3 下 −1~−8% 全 prefill 点;R35 深 stage(sh3/pr2)组合下灾难性 73.7µs(vs 合并 47.2)。三层原因:(1) 稳态吞吐不变 —— period 仍由完整 phase0+phase1 的 recurrence 决定,空窗只是被拆成两段(总量不减),「提前发射 pass 1」省下的在「等残差」处全数还回;(2) 新增净成本 —— 第二次 LDS.128 读整 tile、每 kb 两波 arrive(544+512,合并模式只有一波 544)、phase 2 的 elect_one/描述符重排;(3) 深 stage 放大 —— empty 释放推迟到第二波之后,pr2 窗口把下一拍 transform 的开工闭环到两拍前的残差发射,环路多绕整段 phase 1。代码疑点(存档路径,未修):phase 2 的 SFA1 UTCCP 以 stage_idx 寻址(impls/...gemm.cuh:615),phase 1 与描述符走 slot_pr —— split 与 pr&lt;逻辑深度叠加时读错产物槽;split 仅在均匀深度(slot_pr==stage_idx)下语义正确。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8F0;strokeColor=#D79B00;fontSize=12;align=left;verticalAlign=top;spacing=10" vertex="1" parent="1">
+      <mxGeometry x="160" y="1054" width="1290" height="150" as="geometry" />
+    </mxCell>
+    <mxCell id="scal" value="口径:块宽为示意(split 模式无 warp 时钟档);屏障计数与协议取自代码(a0_full=512+32,transform_full=512,kSplitTransform 分支);e2e 实测 8k gate_up:均匀 s3 时代 −1~−8%(R24),当前默认 sh3/pr2 下 73.7µs。合并模式单拍全景见 transform-warp-timeline-r36.drawio,链长阶梯见 transform-warp-timeline-r37.drawio。" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontColor=#666666;spacing=4" vertex="1" parent="1">
+      <mxGeometry x="160" y="1214" width="1290" height="56" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
