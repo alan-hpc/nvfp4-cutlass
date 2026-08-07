@@ -102,28 +102,31 @@ $u-\mathrm{dec}= \pm 0$ 时加出的 $\pm 2^{-124}$ 级 denormal 被后续 `cvt.
 
 每线程持有 2 个独立 16 元素块(§3 的 slot 映射),两条链显式交错——两个 E4M3 往返 + MUFU rcp(最长延迟环节)先行流水,B 块的标量延迟藏进 A 块的元素运算。与逐块形态同运算同舍入序,输出逐位一致。
 
-```text
-Algorithm 1: decompose_block_packed_x2 —— 每线程 2 块,32 元素
-输入 : xa[8], xb[8]          (各 8×u32 = 16 BF16,LDS.128 已载入)
-输出 : q0a[2],q0b[2], q1a[2],q1b[2]   (打包 E2M1,8 码/字)
-       s0ca,s0cb, s1ca,s1cb           (E4M3 标量码)
-
-—— Phase 1: 两棵 amax 树,交错                       (L379-403)
-1  ta[i] ← hmax2(habs2(xa[2i]), habs2(xa[2i+1]))  i<4   ▷ 深度 3 树,VHMNMX
-2  tb[i] ← 同上                                          ▷ 原线性链深 7,R31 改树
-3  树归约 stride 2→1;byte_perm 半字交换后再 hmax2       ▷ amax_a, amax_b
-—— Phase 2: 两条标量链(两个 MUFU rcp 互相流水)      (L404-416)
-4  s0c ← cvt_e4m3(max(amax · kInvS0Div, 2⁻⁶))           ▷ §1.1 s0;floor §1.3(i)
-5  s0f ← int_as_float((s0c≪20) + 0x3C000000)            ▷ §1.3(i) 整数解码
-6  inv ← fast_rcp(s0f);  s1c ← cvt_e4m3(s0f/8)          ▷ rcp 实测无罪(消融 ≤0.2µs)
-—— Phase 3: 元素运算,A/B 字交错                       (L417-449)
-7  for w < 2:  u[j] ← hmul2(x[4w+j], inv2)   j<4        ▷ §1.4 u;无原生 bf16x2 乘,
-                                                           2×FMUL+F2FP repack(R25)
-8      q0[w] ← cvt_e2m1x8_bf16x2(u[0..3])               ▷ 4 对/asm 向量打包
-9      d[j] ← cvt_bf16x2_e2m1x2(q0[w]≫8j)               ▷ dec(q0),硬件解码
-10     r[j] ← bits(hsub2(u[j], d[j])) + 0x01800180       ▷ Sterbenz 精确 + ×8 §1.3(ii,iii)
-11     q1[w] ← cvt_e2m1x8_bf16x2(r[0..3])               ▷ 残差遍
-```
+$$
+\begin{array}{r l l}
+\hline
+& \rlap{\textbf{Algorithm 1: } \texttt{decompose\_block\_packed\_x2}\ \text{ —— 每线程 2 块(32 元素),两链显式交错}} &\\
+\hline
+& \rlap{\textbf{输入:}\ x_a[8],\ x_b[8]\ \text{(各 8×u32 = 16 BF16,LDS.128 已载入)}} &\\
+& \rlap{\textbf{输出:}\ q_a^{(0)},q_b^{(0)},q_a^{(1)},q_b^{(1)}\ \text{(各 2 字打包 E2M1,8 码/字)};\ \ s_{0a},s_{0b},s_{1a},s_{1b}\ \text{(E4M3 标量码)}} &\\
+\hline
+& \rlap{\text{—— Phase 1:两棵 amax 树,交错(L379–403)}} &\\
+1 & t_a[i] \leftarrow \mathrm{hmax2}\big(\mathrm{habs2}(x_a[2i]),\ \mathrm{habs2}(x_a[2i{+}1])\big),\ \ i<4 & \triangleright\ \text{深度 3 树,VHMNMX 原生}\\
+2 & t_b[i] \leftarrow \text{同上} & \triangleright\ \text{原线性链深 7,R31 改树}\\
+3 & \text{树归约 stride } 2 \to 1;\ \texttt{byte\_perm}\ \text{半字交换再 hmax2} \Rightarrow M_a,\ M_b & \triangleright\ \text{块 amax,精确}\\
+& \rlap{\text{—— Phase 2:两条标量链(两个 MUFU rcp 互相流水)(L404–416)}} &\\
+4 & s_0 \leftarrow \mathrm{cvt\_e4m3}\big(\max(M \cdot \texttt{kInvS0Div},\ 2^{-6})\big) & \triangleright\ \text{§1.1 } s_0\text{;floor §1.3(i)}\\
+5 & s_0^{f32} \leftarrow \mathrm{int\_as\_float}\big((s_0 \ll 20) + \texttt{0x3C000000}\big) & \triangleright\ \text{§1.3(i) 整数解码}\\
+6 & \mathrm{inv} \leftarrow \mathrm{rcp}(s_0^{f32});\quad s_1 \leftarrow \mathrm{cvt\_e4m3}(s_0^{f32}/8) & \triangleright\ \text{rcp 消融无罪(≤0.2µs)}\\
+& \rlap{\text{—— Phase 3:元素运算,A/B 字交错(L417–449);循环 } w<2,\ j<4} &\\
+7 & u[j] \leftarrow \mathrm{hmul2}(x[4w{+}j],\ \mathrm{inv2}) & \triangleright\ \text{无原生 bf16x2 乘:2×FMUL+F2FP(R25)}\\
+8 & q^{(0)}[w] \leftarrow \mathrm{cvt\_e2m1x8}(u[0..3]) & \triangleright\ \text{4 对/asm 向量打包量化}\\
+9 & d[j] \leftarrow \mathrm{cvt\_bf16x2}(q^{(0)}[w] \gg 8j) & \triangleright\ \mathrm{dec}(q^{(0)})\text{,硬件解码}\\
+10 & r[j] \leftarrow \mathrm{bits}\big(\mathrm{hsub2}(u[j],\ d[j])\big) + \texttt{0x01800180} & \triangleright\ \text{Sterbenz 精确 + ×8,§1.3(ii,iii)}\\
+11 & q^{(1)}[w] \leftarrow \mathrm{cvt\_e2m1x8}(r[0..3]) & \triangleright\ \text{残差遍}\\
+\hline
+\end{array}
+$$
 
 **函数体对照表**:
 
@@ -150,39 +153,34 @@ $$\texttt{kBlocksPerSlot} = \min\!\Big(\frac{\text{BLOCK\_M}\cdot\text{BLOCK\_K}
 
 ### Algorithm 3: 主 kernel,warp 特化角色 —— [sm100_bf16_dual_nvfp4_gemm.cuh](../include/nvfp4_gemm/impls/sm100_bf16_dual_nvfp4_gemm.cuh)
 
-```text
-Algorithm 3: sm100_bf16_dual_nvfp4_gemm —— persistent,每 CTA 静态跨步取 tile
-输入 : tensor_map_a/b/sfb/cd(TMA 描述符), m_indices, global_scales
-输出 : D (BF16)
-▷ 序幕(全 CTA):warp1 init 22 个 mbarrier(L273-295);warp2 TMEM 分配 512 列;
-  __syncthreads;cudaGridDependencySynchronize(PDL)
-▷ 以下角色并发,仅经 mbarrier 通信,主循环零 __syncthreads
-
-1  if warp = 0 (TMA producer, L341-440):                    wait 80% / work 7%
-2    for 每 k-block t:
-3      try_wait(empty[s], φ^1);影子门 transform_full[t−3]    ▷ B 槽释放 + A 槽读完
-4      cp.async.bulk.tensor ×3:A(32768B)→full_a[s];
-       W(16384B)+SFB(2048B)→full[s]                          ▷ arrive_and_expect_tx
-5    尾:cudaTriggerProgrammaticLaunchCompletion(PDL)
-6  elif warp = 1 (MMA issue, L445-636):                     wait 64% / work 31%
-7    for 每 k-block t:
-8      try_wait(transform_full[s], φ);try_wait(full[s], φ)   ▷ 544 arrive;B 快门
-9      exchange a0/a1 描述符(slot_pr 游标)
-10     elect_one: UTCCP 拷 SFA0/SFA1/SFB → TMEM
-11     for 每 64-K atom a(bk128 → 2 个):
-12       tcgen05.mma.kind::mxf4nvf4.block_scale.block16(A0×W, scale_c=首块清零)
-13       tcgen05.mma.…(A1×W, 恒累加)                          ▷ 双遍同一累加器,§1.2
-14     umma_arrive(empty[s]);tile 尾块再 umma_arrive(tmem_full)
-15 elif warp = 2 (L642-675): SFB warp-shuffle 转置 → arrive(transform_full)
-16 elif warp ∈ [3, 19) (transform ×16, L679-786):           wait 22% / work 76%
-17   for 每 k-block t:
-18     try_wait(full_a[s], φ);try_wait(empty[s_pr], φ_pr)    ▷ A 到货 + 产物槽空
-19     transform_a_tile(Algorithm 2 → Algorithm 1)           ▷ 575ns,节拍源
-20     fence.proxy.async;arrive(transform_full[s])           ▷ 512 线程计数
-21 else (epilogue ×4 warp, L790+):                    per-tile wait 87% / work 13%
-22   每 16 拍被尾块 umma_arrive 唤醒:tcgen05.ld 批量读 TMEM
-     → ×G_W → BF16 → TMA store(cd64 双缓冲)→ arrive(tmem_empty, 128 线程)
-```
+$$
+\begin{array}{r l l}
+\hline
+& \rlap{\textbf{Algorithm 3: } \texttt{sm100\_bf16\_dual\_nvfp4\_gemm}\ \text{ —— persistent,warp 特化,主循环零 } \texttt{\_\_syncthreads}} &\\
+\hline
+& \rlap{\text{序幕(全 CTA):warp1 init 22 个 mbarrier(L273–295);warp2 分配 TMEM 512 列;}\texttt{\_\_syncthreads}\text{;PDL 同步}} &\\
+& \rlap{\text{各角色主体均为 for 每 k-block } t \text{ 的循环,仅经 mbarrier 通信;下列为循环体}} &\\
+\hline
+1 & \textbf{if}\ \text{warp} = 0\ \text{(TMA producer,L341–440)}: & \triangleright\ \text{wait 80\% / work 7\%}\\
+2 & \quad \mathrm{try\_wait}(\mathrm{empty}[s], \varphi{\oplus}1);\ \text{影子门 } \mathrm{tfm\_full}[t{-}3] & \triangleright\ \text{B 槽释放 + A 槽读完}\\
+3 & \quad \text{cp.async.bulk.tensor} \times 3:\ A\,(32768\,\mathrm{B}) \to \mathrm{full\_a}[s];\ W{+}\mathrm{SFB}\,(18432\,\mathrm{B}) \to \mathrm{full}[s] & \triangleright\ \texttt{arrive\_and\_expect\_tx}\\
+4 & \quad \text{尾:}\ \text{cudaTriggerProgrammaticLaunchCompletion(PDL)} &\\
+5 & \textbf{elif}\ \text{warp} = 1\ \text{(MMA issue,L445–636)}: & \triangleright\ \text{wait 64\% / work 31\%}\\
+6 & \quad \mathrm{try\_wait}(\mathrm{tfm\_full}[s], \varphi);\ \mathrm{try\_wait}(\mathrm{full}[s], \varphi) & \triangleright\ 544\ \text{arrive;B 快门}\\
+7 & \quad \text{exchange } a_0/a_1\ \text{描述符(} \mathrm{slot}_{pr}\ \text{游标);elect\_one: UTCCP 拷 SFA0/SFA1/SFB} \to \text{TMEM} &\\
+8 & \quad \textbf{for}\ \text{每 64-K atom:}\ \text{tcgen05.mma}(A_0{\times}W,\ \text{首块 } \mathrm{scale\_c}{=}0);\ \ \text{tcgen05.mma}(A_1{\times}W,\ \text{恒累加}) & \triangleright\ \text{双遍同一累加器,§1.2}\\
+9 & \quad \mathrm{umma\_arrive}(\mathrm{empty}[s]);\ \text{tile 尾块再} \to \mathrm{umma\_arrive}(\mathrm{tmem\_full}) &\\
+10 & \textbf{elif}\ \text{warp} = 2\ \text{(L642–675)}:\ \text{SFB warp-shuffle 转置} \to \mathrm{arrive}(\mathrm{tfm\_full}[s]) & \triangleright\ \text{32 arrive 份额}\\
+11 & \textbf{elif}\ \text{warp} \in [3,19)\ \text{(transform ×16,L679–786)}: & \triangleright\ \text{wait 22\% / work 76\%}\\
+12 & \quad \mathrm{try\_wait}(\mathrm{full\_a}[s], \varphi);\ \mathrm{try\_wait}(\mathrm{empty}[s_{pr}], \varphi_{pr}) & \triangleright\ \text{A 到货 + 产物槽空}\\
+13 & \quad \texttt{transform\_a\_tile}\ \text{(Algorithm 2 → Algorithm 1)} & \triangleright\ 575\,\mathrm{ns}\text{,节拍源}\\
+14 & \quad \text{fence.proxy.async};\ \mathrm{arrive}(\mathrm{tfm\_full}[s]) & \triangleright\ 512\ \text{线程计数}\\
+15 & \textbf{else}\ \text{(epilogue ×4 warp,L790+)}: & \triangleright\ \text{wait 87\% / work 13\%(per tile)}\\
+16 & \quad \text{每 16 拍被尾块 umma\_arrive 唤醒:tcgen05.ld 批量读 TMEM} \to {\times}G_W \to \text{BF16} & \\
+17 & \quad \to \text{TMA store(cd64 双缓冲)} \to \mathrm{arrive}(\mathrm{tmem\_empty},\ 128\ \text{线程}) &\\
+\hline
+\end{array}
+$$
 
 wait/work 占比为 probe3 warp 时钟实测(8k gate_up,own-iter 归一,GHz 1.965):tma 0.603/0.051、tfm 0.168/0.570、mma 0.486/0.236 µs/kb,epi 12.15/1.75 µs/tile。
 
